@@ -1,5 +1,5 @@
 window.APP_CONFIG = {
-  SUPABASE_URL: "URL_SUPABASE_KAMU",
+  SUPABASE_URL: "https://abmjkuppxfivkzqzxhkz.supabase.co",
   SUPABASE_ANON_KEY: "ANON_KEY_KAMU",
   STORAGE_BUCKET: "dokumen",
   GEMINI_MODE: "edge",
