@@ -244,13 +244,46 @@ $('#mSimpan').onclick=async()=>{
 $('#mHapus').onclick=async()=>{if(!editing)return;if($('#mHapus').dataset.c!=='1'){$('#mHapus').dataset.c='1';$('#mHapus').textContent='Klik lagi untuk hapus';return}
   try{await sbDelete(editing.id);$('#mbg').classList.remove('open');toast('Dihapus');loadPos()}catch(e){toast('Gagal: '+(e.message||e.code))}$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus'};
 
-/* ---------- CSV export ---------- */
+/* ---------- Export CSV / Excel ---------- */
+function exportRows(){
+  const list=filteredPo();
+  const nums=(p,f,single)=>{const arr=(p[f]&&p[f].length)?p[f]:(p[single]?[p[single]]:[]);return arr.filter(Boolean)};
+  const maxPo=Math.max(2,...list.map(p=>nums(p,'po_nos','po_no').length),2);
+  const maxGr=Math.max(2,...list.map(p=>nums(p,'gr_nos','gr_no').length),2);
+  const H=['Tanggal','Region','Supplier'];
+  for(let i=0;i<maxPo;i++)H.push('No PO '+(i+1));
+  H.push('Jam PO','Petugas PO');
+  for(let i=0;i<maxGr;i++)H.push('No GR '+(i+1));
+  H.push('Jam GR','Petugas GR','PO->GR (jam)','No Invoice','Jam Invoice','Petugas Invoice','GR->Inv (jam)','Nominal','No Inv Distributor','GR Return','Tgl dok PO','Tgl dok GR','Tgl dok Invoice','Keterangan','Barang diterima gudang','Invoice distributor diterima','Status tunggu','Total PO (dok)','Total Fisik','Total ESB','Status Cek','Selisih','Detail selisih');
+  const n=v=>(v==null||v==='')?'':Number(v);
+  const rows=list.map(p=>{const c=cekOf(p);const po=nums(p,'po_nos','po_no'),gr=nums(p,'gr_nos','gr_no');
+    const r=[p.tgl||'',p.region||'',p.supplier||''];
+    for(let i=0;i<maxPo;i++)r.push(po[i]||'');
+    r.push(jkt(p.po_at),p.po_by?nm(p.po_by):'');
+    for(let i=0;i<maxGr;i++)r.push(gr[i]||'');
+    r.push(jkt(p.gr_at),p.gr_by?nm(p.gr_by):'',n(hours(p.po_at,p.gr_at)?.toFixed(2)),p.inv_no||'',jkt(p.inv_at),p.inv_by?nm(p.inv_by):'',n(hours(invStart(p),p.inv_at)?.toFixed(2)),n(p.nominal),p.inv_dist||'',p.gr_return||'',p.po_date||'',p.gr_date||'',p.inv_date||'',p.keterangan||'',p.barang_terima||'',p.inv_terima_at?p.inv_terima_at.slice(0,10):'',isTunggu(p)?'MENUNGGU INVOICE DISTRIBUTOR':'',n(c&&c.total_po),n(c&&c.total_fisik),n(c&&c.total_esb),c?c.status:'',n(c&&c.selisih),c?c.detail||'':'');
+    return r});
+  return {H,rows,list};
+}
 $('#btnCsv').onclick=async()=>{
-  const list=filteredPo();const H=['Tanggal','Region','Supplier','No PO','Jam PO','Petugas PO','No GR','Jam GR','Petugas GR','PO->GR (jam)','No Invoice','Jam Invoice','Petugas Invoice','GR->Inv (jam)','Nominal','No Inv Distributor','GR Return','Tgl dok PO','Tgl dok GR','Tgl dok Invoice','Keterangan','Barang diterima gudang','Invoice distributor diterima','Status tunggu','Total PO (dok)','Total Fisik','Total ESB','Status Cek','Selisih','Detail selisih'];
+  const fmt=$('#expFmt')?$('#expFmt').value:'csv';
+  const {H,rows,list}=exportRows();
+  if(!list.length)return toast('Tidak ada data untuk diexport');
+  const fn='PO_Tracking_'+jktDate();
+  if(fmt==='xlsx'){
+    try{
+      await loadXlsx();
+      const ws=XLSX.utils.aoa_to_sheet([H,...rows]);
+      ws['!cols']=H.map(h=>({wch:/Supplier|Keterangan|Detail/.test(h)?28:/No PO|No GR|No Invoice|Jam|Petugas/.test(h)?18:14}));
+      ws['!freeze']={xSplit:0,ySplit:1};
+      const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'PO Tracking');
+      XLSX.writeFile(wb,fn+'.xlsx');toast('Excel diunduh ('+rows.length+' baris)');return;
+    }catch(e){toast('Gagal membuat Excel ('+e.message+') — diunduh sebagai CSV')}
+  }
   const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
-  const rows=list.map(p=>{const c=cekOf(p);return [p.tgl,p.region,p.supplier,(p.po_nos&&p.po_nos.length?p.po_nos:[p.po_no]).filter(Boolean).join(' + '),jkt(p.po_at),nm(p.po_by),(p.gr_nos&&p.gr_nos.length?p.gr_nos:[p.gr_no]).filter(Boolean).join(' + '),jkt(p.gr_at),p.gr_by?nm(p.gr_by):'',hours(p.po_at,p.gr_at)?.toFixed(2)||'',p.inv_no,jkt(p.inv_at),p.inv_by?nm(p.inv_by):'',hours(invStart(p),p.inv_at)?.toFixed(2)||'',p.nominal??'',p.inv_dist,p.gr_return,p.po_date||'',p.gr_date||'',p.inv_date||'',p.keterangan,p.barang_terima||'',p.inv_terima_at?p.inv_terima_at.slice(0,10):'',isTunggu(p)?'MENUNGGU INVOICE DISTRIBUTOR':'',c?c.total_po??'':'',c?c.total_fisik??'':'',c?c.total_esb??'':'',c?c.status:'',c&&c.selisih!=null?c.selisih:'',c?c.detail||'':''].map(q).join(';')});
-  const csv='﻿'+H.join(';')+'\n'+rows.join('\n');const fn='PO_Tracking_'+jktDate()+'.csv';
-  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=fn;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+  const csv='﻿'+[H,...rows].map(r=>r.map(q).join(';')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=fn+'.csv';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+  toast('CSV diunduh ('+rows.length+' baris)');
 };
 
 const SLOTS=[{k:'po',drop:'dropP',file:'fileP',tot:'totP',ai:'aiP',num:'mPo',multi:true,label:'Dokumen PO',icon:'🧾',desc:'dokumen Purchase Order (PO) dari sistem ESB',hint:'PDF PO dari ESB · bisa lebih dari 1 (barang susulan)'},

@@ -61,7 +61,7 @@
     <label class="f">Cari<input id="pCari" placeholder="No PO / GR / Invoice / supplier" style="min-width:240px"></label>
     <label class="f">Dari tanggal<input type="date" id="pDari"></label>
     <label class="f">Sampai<input type="date" id="pSampai"></label>
-    <button class="btn" id="btnCsv" style="margin-left:auto">⬇ Export CSV</button>
+    <div class="row" style="margin-left:auto;gap:6px;align-items:flex-end"><label class="f">Format<select id="expFmt"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option></select></label><button class="btn p" id="btnCsv">⬇ Export</button></div>
   </div></div>
   <div class="card"><div class="sub" id="pInfo" style="margin-bottom:8px"></div><div class="tw"><table id="tPo"></table></div></div>
 </section>
