@@ -115,10 +115,10 @@
     <label class="f">Region *<select id="mRegion"></select></label>
     <label class="f">Tanggal input grup gudang<input type="date" id="mTglGudang"></label>
     <label class="f" style="grid-column:span 2">Supplier *<input id="mSup" list="supList" placeholder="nama supplier sesuai ESB"><datalist id="supList"></datalist></label>
-    <label class="f">No. PO * <span class="sub" style="font-weight:400">(boleh kosong jika barang diterima &amp; menunggu invoice)</span><input id="mPo" class="mono" placeholder="PO2026110600xx"><div class="stamp" id="stPo"></div></label>
-    <label class="f">No. GR<input id="mGr" class="mono" placeholder="GR2026110600xx"><div class="stamp" id="stGr"></div></label>
+    <label class="f">No. PO * <span class="sub" style="font-weight:400">(boleh kosong jika menunggu invoice · pisahkan dengan koma bila lebih dari satu)</span><input id="mPo" class="mono" placeholder="PO2026110600xx, PO2026110600yy"><div class="stamp" id="stPo"></div></label>
+    <label class="f">No. GR <span class="sub" style="font-weight:400">(bisa lebih dari satu)</span><input id="mGr" class="mono" placeholder="GR2026110600xx, GR2026110600yy"><div class="stamp" id="stGr"></div></label>
     <label class="f">No. Invoice (ESB)<input id="mInv" class="mono" placeholder="VI2026110600xx"><div class="stamp" id="stInv"></div></label>
-    <label class="f">Nominal invoice (Rp)<input id="mNom" inputmode="numeric"></label>
+    <label class="f">Nominal invoice (Rp) <span class="sub" style="font-weight:400">otomatis dari Invoice ESB</span><input id="mNom" inputmode="numeric"></label>
     <label class="f">No. GR Return<input id="mRet" class="mono"></label>
     <label class="f">No. Invoice distributor<input id="mDist"></label>
     <label class="f" style="grid-column:span 2">Keterangan<input id="mKet"></label>
@@ -131,11 +131,11 @@
     </div>
     <div class="stamp" id="stTunggu"></div>
   </div>
-  <h3 style="font-size:12.5px;margin:16px 0 8px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Dokumen: PO · GR · Invoice fisik · Invoice ESB <span style="text-transform:none;font-weight:400">— nomor &amp; total terisi otomatis dari PDF ESB</span></h3>
+  <h3 style="font-size:12.5px;margin:16px 0 8px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Dokumen: PO · GR · Invoice fisik · Invoice ESB <span style="text-transform:none;font-weight:400">— nomor, tanggal &amp; total terisi otomatis dari PDF ESB. PO/GR boleh lebih dari satu dokumen untuk satu invoice.</span></h3>
   <div class="cmp4">
-    <div><div class="drop" id="dropP">🧾 <b>Dokumen PO</b><br><span class="sub">PDF PO dari ESB</span><input type="file" id="fileP" accept="image/*,application/pdf" hidden></div>
+    <div><div class="drop" id="dropP">🧾 <b>Dokumen PO</b><br><span class="sub">PDF PO dari ESB · bisa lebih dari 1 (barang susulan)</span><input type="file" id="fileP" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total PO (Rp)<input id="totP" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiP"></div></div>
-    <div><div class="drop" id="dropG">📦 <b>Dokumen GR</b><br><span class="sub">PDF Goods Receipt dari ESB · arsip saja</span><input type="file" id="fileG" accept="image/*,application/pdf" hidden></div>
+    <div><div class="drop" id="dropG">📦 <b>Dokumen GR</b><br><span class="sub">PDF Goods Receipt · bisa lebih dari 1 · arsip saja</span><input type="file" id="fileG" accept="image/*,application/pdf" hidden></div>
       <div class="sub" id="aiG" style="margin-top:8px"></div></div>
     <div><div class="drop" id="dropF">📄 <b>Invoice / Surat Jalan FISIK</b><br><span class="sub">foto atau PDF dari distributor</span><input type="file" id="fileF" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total Invoice Fisik (Rp)<input id="totF" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiF"></div></div>

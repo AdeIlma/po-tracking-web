@@ -64,3 +64,14 @@ a{color:var(--blue)}
 
 code{background:#F3F4F6;padding:1px 5px;border-radius:4px;font-size:12px}
 #loginBg .modal{box-shadow:0 10px 30px rgba(0,0,0,.08)}
+
+.drophead{font-size:12.5px;margin-bottom:6px}
+.filerow{display:flex;gap:8px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 6px;margin-bottom:5px;text-align:left}
+.filerow .fileinfo{flex:1;min-width:0}
+.filerow .filename{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filerow .sub{font-size:10.5px}
+.filepdf{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--red);border:1px solid var(--line);border-radius:6px;background:#fff}
+.filerow img.thumb{width:30px;height:30px;flex:none}
+.xdel{border:none;background:transparent;color:var(--mut);font-size:16px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:6px}
+.xdel:hover{background:var(--bad-l);color:var(--bad)}
+.drop.has{text-align:left}
