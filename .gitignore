@@ -1,0 +1,22 @@
+# Konfigurasi dan secret
+config.js
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+python/.venv/
+python/.env
+
+# File sementara
+.DS_Store
+_body.html
+_app_src.js
+
+# Data perusahaan
+data/*.xlsx
+
+# Supabase temporary files
+supabase/.temp/

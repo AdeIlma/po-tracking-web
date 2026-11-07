@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PO Tracking & Cek Invoice — DTG × HWG</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23C8102E'/><text x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>PO</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+<script src="config.js"></script>
+</head>
+<body>
+<header>
+  <div><div class="brand">DTG × HWG · COST CONTROL</div><h1>PO Tracking <span>&amp;</span> Cek Invoice</h1></div>
+  <nav>
+    <button data-v="dash" class="active">Dashboard KPI</button>
+    <button data-v="out">Outstanding <span class="pill" id="pillOut">0</span></button>
+    <button data-v="po">PO Tracking <span class="pill" id="pillCek" title="selisih invoice">0</span></button>
+    <button data-v="set">Import &amp; Setting</button>
+  </nav>
+  <div class="who" id="who">Menghubungkan…</div>
+  <button class="btn sm" id="btnLogout" style="display:none">Keluar</button>
+</header>
+<main>
+
+<!-- DASHBOARD -->
+<section class="view active" id="v-dash">
+  <div class="card"><div class="row">
+    <label class="f">Periode<select id="dPeriode"><option value="bulan">Bulan ini</option><option value="7">7 hari terakhir</option><option value="30">30 hari terakhir</option><option value="all">Semua (sejak Nov 2026)</option></select></label>
+    <label class="f">Region<select id="dRegion"><option value="">Semua region</option></select></label>
+    <div class="note" style="margin-left:auto">KPI jam dihitung dari PO yang diinput <b>lewat sistem ini</b> (ada jam). Data import dari Excel (tanpa jam) masuk ke hitungan jumlah &amp; outstanding saja.</div>
+  </div></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="card"><h2>KPI per Region</h2><div class="tw" style="max-height:none"><table id="tRegion"></table></div></div>
+  <div class="card"><h2>KPI per Petugas</h2><div class="sub" style="margin-bottom:8px">PO→GR dihitung ke petugas yang mengisi No. GR; GR→Invoice ke petugas yang mengisi No. Invoice.</div><div class="tw" style="max-height:none"><table id="tUser"></table></div></div>
+  <div class="card"><h2>Cek total PO · Invoice fisik · Invoice ESB</h2><div class="tw" style="max-height:none"><table id="tCekSum"></table></div></div>
+</section>
+
+<!-- OUTSTANDING -->
+<section class="view" id="v-out">
+  <div class="card"><div class="row">
+    <label class="f">Region<select id="oRegion"><option value="">Semua region</option></select></label>
+    <label class="f">Urutkan<select id="oSort"><option value="age">Paling lama dulu</option><option value="new">Terbaru dulu</option></select></label>
+    <span class="sub" id="oInfo" style="margin-left:auto"></span>
+  </div></div>
+  <div class="card"><h2>🟥 Sudah PO, belum GR <span class="b red" id="cntNoGR">0</span></h2><div class="tw"><table id="tNoGR"></table></div></div>
+  <div class="card"><h2>🟧 Sudah GR, belum Invoice <span class="b warn" id="cntNoInv">0</span></h2><div class="tw"><table id="tNoInv"></table></div></div>
+  <div class="card"><h2>📦 Barang diterima gudang, menunggu invoice distributor <span class="b blue" id="cntTunggu">0</span></h2><div class="sub" style="margin-bottom:8px">Bukan keterlambatan tim — menunggu dokumen dari distributor. Masa tunggu tidak dihitung ke KPI.</div><div class="tw"><table id="tTunggu"></table></div></div>
+</section>
+
+<!-- PO TRACKING -->
+<section class="view" id="v-po">
+  <div class="card"><div class="row">
+    <button class="btn p" id="btnNew">+ PO Baru</button>
+    <label class="f">Region<select id="pRegion"><option value="">Semua</option></select></label>
+    <label class="f">Status<select id="pStatus"><option value="">Semua</option><option value="nogr">Belum GR</option><option value="noinv">Belum Invoice</option><option value="done">Lengkap</option><option value="tunggu">Menunggu invoice distributor</option><option value="selisih">Cek: SELISIH</option><option value="match">Cek: MATCH</option><option value="belumcek">Cek belum lengkap</option></select></label>
+    <label class="f">Cari<input id="pCari" placeholder="No PO / GR / Invoice / supplier" style="min-width:240px"></label>
+    <label class="f">Dari tanggal<input type="date" id="pDari"></label>
+    <label class="f">Sampai<input type="date" id="pSampai"></label>
+    <button class="btn" id="btnCsv" style="margin-left:auto">⬇ Export CSV</button>
+  </div></div>
+  <div class="card"><div class="sub" id="pInfo" style="margin-bottom:8px"></div><div class="tw"><table id="tPo"></table></div></div>
+</section>
+
+
+<!-- SETTING -->
+<section class="view" id="v-set">
+  <div class="card">
+    <h2>Profil saya</h2>
+    <div class="row"><label class="f">Nama tampilan (dipakai di KPI per petugas)<input id="myName" placeholder="mis. Rina – Admin Invoice JOGJA" style="min-width:300px"></label><button class="btn p" id="btnSaveName" style="align-self:flex-end">Simpan nama</button><span class="sub" id="myRole"></span></div>
+  </div>
+  <div class="card">
+    <h2>Target KPI &amp; toleransi</h2>
+    <div class="grid">
+      <label class="f">Target PO → GR (jam)<input type="number" id="sGr" min="1"></label>
+      <label class="f">Target GR → Invoice (jam)<input type="number" id="sInv" min="1"></label>
+      <label class="f">Toleransi selisih total (Rp)<input type="number" id="sTol" min="0"></label>
+    </div>
+    <div class="row" style="margin-top:10px"><button class="btn p" id="btnSaveSet">Simpan setting</button><span class="sub" id="setInfo">Hanya Editor/Owner yang bisa mengubah.</span></div>
+  </div>
+  <div class="card">
+    <h2>Import dari Excel tracking lama</h2><div class="sub" style="margin-bottom:6px">Alternatif: jalankan <code>python/upload_seed.py</code> (lihat README) — lebih cepat untuk ribuan baris.</div>
+    <div class="sub" style="margin-bottom:8px">Format: sheet per region (BALI, YOGYAKARTA, JATIM, JATENG, JELUPANG), kolom Tanggal Input System · Tanggal Input Grup Gudang · Supplier · No. PO · No. GR · No. Invoice · Keterangan. Baris tanpa jam ditandai <i>import</i>, No PO yang sudah ada dilewati.</div>
+    <div class="row">
+      <input type="file" id="impFile" accept=".xlsx,.xls">
+      <label class="f">Mulai tanggal<input type="date" id="impDari" value="2026-11-01"></label>
+      <button class="btn p" id="btnImport" disabled>Import</button>
+    </div>
+    <div id="impLog" class="sub" style="margin-top:8px"></div>
+    <div class="bar" style="margin-top:6px"><i id="impBar" style="width:0"></i></div>
+  </div>
+  <div class="card">
+    <h2>Cara pakai</h2>
+    <ol style="margin:0;padding-left:18px;line-height:1.7">
+      <li><b>PO Tracking → + PO Baru</b>: isi region, supplier, No PO. Jam input PO terekam otomatis.</li>
+      <li>Saat GR sudah dibuat di ESB, buka baris PO → <b>Isi GR</b>. Jam GR terekam otomatis saat pertama kali diisi.</li>
+      <li>Saat invoice sudah diinput → <b>Isi Invoice</b>. Jam invoice terekam otomatis.</li>
+      <li>Login dengan email yang didaftarkan admin di Supabase, lalu isi <b>Nama tampilan</b> di menu ini.</li>
+      <li>Di form PO, upload <b>PDF dari ESB</b> (PO, GR, Purchase Invoice): nomor PO/GR/Invoice, supplier, region, total, dan nomor invoice distributor <b>terisi otomatis</b>. Invoice/surat jalan fisik (foto) dibaca dengan tombol AI. Boleh bertahap oleh staf berbeda; begitu ada dua total, perbandingan langsung muncul (mis. PO vs Fisik), dan MATCH/SELISIH final saat ketiganya terisi.</li>
+      <li>Kalau barang sudah masuk gudang tapi distributor belum memberi invoice (PO pun belum bisa dibuat), isi supplier, centang <b>📦 Barang sudah diterima, invoice distributor belum ada</b> di form PO. No. PO boleh dikosongkan dulu. PO pindah ke daftar tersendiri dan masa tunggunya tidak dihitung ke KPI; saat PO dibuat, isi nomornya — jam PO terekam saat itu. Saat invoice datang, isi <i>Tanggal invoice distributor diterima</i> — KPI GR→Invoice dihitung dari tanggal itu.</li>
+      <li><b>Outstanding</b> selalu live: PO yang belum GR dan GR yang belum invoice, diurutkan dari yang paling lama.</li>
+    </ol>
+  </div>
+</section>
+</main>
+
+<!-- MODAL PO -->
+<div class="modal-bg" id="mbg"><div class="modal">
+  <h2 id="mTitle">PO Baru</h2>
+  <div class="grid">
+    <label class="f">Region *<select id="mRegion"></select></label>
+    <label class="f">Tanggal input grup gudang<input type="date" id="mTglGudang"></label>
+    <label class="f" style="grid-column:span 2">Supplier *<input id="mSup" list="supList" placeholder="nama supplier sesuai ESB"><datalist id="supList"></datalist></label>
+    <label class="f">No. PO * <span class="sub" style="font-weight:400">(boleh kosong jika barang diterima &amp; menunggu invoice)</span><input id="mPo" class="mono" placeholder="PO2026110600xx"><div class="stamp" id="stPo"></div></label>
+    <label class="f">No. GR<input id="mGr" class="mono" placeholder="GR2026110600xx"><div class="stamp" id="stGr"></div></label>
+    <label class="f">No. Invoice (ESB)<input id="mInv" class="mono" placeholder="VI2026110600xx"><div class="stamp" id="stInv"></div></label>
+    <label class="f">Nominal invoice (Rp)<input id="mNom" inputmode="numeric"></label>
+    <label class="f">No. GR Return<input id="mRet" class="mono"></label>
+    <label class="f">No. Invoice distributor<input id="mDist"></label>
+    <label class="f" style="grid-column:span 2">Keterangan<input id="mKet"></label>
+  </div>
+  <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#FAFAFA">
+    <label style="display:flex;gap:8px;align-items:center;font-weight:600;cursor:pointer"><input type="checkbox" id="mTunggu" style="width:16px;height:16px"> 📦 Barang sudah diterima di gudang, <u>invoice dari distributor belum ada</u></label>
+    <div class="grid" style="margin-top:8px">
+      <label class="f">Tanggal barang diterima gudang<input type="date" id="mTerima"></label>
+      <label class="f">Tanggal invoice distributor diterima<input type="date" id="mInvTerima"><div class="stamp">isi saat invoice fisik akhirnya datang — menutup masa tunggu; KPI GR→Invoice dihitung dari tanggal ini</div></label>
+    </div>
+    <div class="stamp" id="stTunggu"></div>
+  </div>
+  <h3 style="font-size:12.5px;margin:16px 0 8px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Dokumen: PO · GR · Invoice fisik · Invoice ESB <span style="text-transform:none;font-weight:400">— nomor &amp; total terisi otomatis dari PDF ESB</span></h3>
+  <div class="cmp4">
+    <div><div class="drop" id="dropP">🧾 <b>Dokumen PO</b><br><span class="sub">PDF PO dari ESB</span><input type="file" id="fileP" accept="image/*,application/pdf" hidden></div>
+      <label class="f" style="margin-top:8px">Total PO (Rp)<input id="totP" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiP"></div></div>
+    <div><div class="drop" id="dropG">📦 <b>Dokumen GR</b><br><span class="sub">PDF Goods Receipt dari ESB · arsip saja</span><input type="file" id="fileG" accept="image/*,application/pdf" hidden></div>
+      <div class="sub" id="aiG" style="margin-top:8px"></div></div>
+    <div><div class="drop" id="dropF">📄 <b>Invoice / Surat Jalan FISIK</b><br><span class="sub">foto atau PDF dari distributor</span><input type="file" id="fileF" accept="image/*,application/pdf" hidden></div>
+      <label class="f" style="margin-top:8px">Total Invoice Fisik (Rp)<input id="totF" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiF"></div></div>
+    <div><div class="drop" id="dropE">🖥️ <b>Invoice ESB</b><br><span class="sub">PDF Purchase Invoice dari ESB</span><input type="file" id="fileE" accept="image/*,application/pdf" hidden></div>
+      <label class="f" style="margin-top:8px">Total Invoice ESB (Rp)<input id="totE" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiE"></div></div>
+  </div>
+  <div class="row" style="margin-top:8px"><button class="btn p" id="btnAI">🔍 Baca total dengan AI</button><span class="sub">untuk foto/scan (mis. invoice fisik) yang tidak terbaca otomatis; hasil bisa dikoreksi manual</span></div>
+  <div class="res mut" id="cRes" style="margin-top:10px">Upload / isi yang sudah ada — boleh disimpan sebagian</div>
+  <label class="f" style="margin-top:8px">Catatan cek<input id="cNote" placeholder="opsional"></label>
+  <div class="row" style="margin-top:14px;justify-content:flex-end">
+    <button class="btn" id="mHapus" style="margin-right:auto;color:var(--bad)">Hapus</button>
+    <button class="btn" id="mBatal">Batal</button>
+    <button class="btn p" id="mSimpan">Simpan</button>
+  </div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+
+<!-- LOGIN -->
+<div class="modal-bg open" id="loginBg" style="align-items:center;background:var(--bg)">
+  <div class="modal" style="max-width:380px">
+    <div class="brand">DTG × HWG · COST CONTROL</div><h2 style="margin:4px 0 14px">Masuk ke PO Tracking</h2>
+    <form id="loginForm" class="grid" style="grid-template-columns:1fr">
+      <label class="f">Email<input type="email" id="lEmail" autocomplete="username" required></label>
+      <label class="f">Password<input type="password" id="lPass" autocomplete="current-password" required></label>
+      <button class="btn p" type="submit" id="btnLogin">Masuk</button>
+      <div class="sub" id="loginMsg"></div>
+    </form>
+    <div class="sub" style="margin-top:10px">Belum punya akun? Minta admin menambahkan email Anda di Supabase → Authentication → Users.</div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
