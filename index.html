@@ -115,8 +115,8 @@
     <label class="f">Region *<select id="mRegion"></select></label>
     <label class="f">Tanggal input grup gudang<input type="date" id="mTglGudang"></label>
     <label class="f" style="grid-column:span 2">Supplier *<input id="mSup" list="supList" placeholder="nama supplier sesuai ESB"><datalist id="supList"></datalist></label>
-    <label class="f">No. PO * <span class="sub" style="font-weight:400">(boleh kosong jika menunggu invoice · pisahkan dengan koma bila lebih dari satu)</span><input id="mPo" class="mono" placeholder="PO2026110600xx, PO2026110600yy"><div class="stamp" id="stPo"></div></label>
-    <label class="f">No. GR <span class="sub" style="font-weight:400">(bisa lebih dari satu)</span><input id="mGr" class="mono" placeholder="GR2026110600xx, GR2026110600yy"><div class="stamp" id="stGr"></div></label>
+    <label class="f" style="grid-column:span 2">No. PO * <span class="sub" style="font-weight:400">(kolom ke-2 diisi bila ada dokumen PO susulan)</span><div class="numgrid" id="grpPo"><input id="mPo" class="mono" placeholder="PO… dokumen 1"><input id="mPo2" class="mono" placeholder="PO… dokumen 2 (opsional)"></div><div class="stamp" id="stPo"></div></label>
+    <label class="f" style="grid-column:span 2">No. GR <span class="sub" style="font-weight:400">(kolom ke-2 diisi bila ada dokumen GR susulan)</span><div class="numgrid" id="grpGr"><input id="mGr" class="mono" placeholder="GR… dokumen 1"><input id="mGr2" class="mono" placeholder="GR… dokumen 2 (opsional)"></div><div class="stamp" id="stGr"></div></label>
     <label class="f">No. Invoice (ESB)<input id="mInv" class="mono" placeholder="VI2026110600xx"><div class="stamp" id="stInv"></div></label>
     <label class="f">Nominal invoice (Rp) <span class="sub" style="font-weight:400">otomatis dari Invoice ESB</span><input id="mNom" inputmode="numeric"></label>
     <label class="f">No. GR Return<input id="mRet" class="mono"></label>

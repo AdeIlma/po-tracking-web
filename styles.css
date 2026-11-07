@@ -75,3 +75,7 @@ code{background:#F3F4F6;padding:1px 5px;border-radius:4px;font-size:12px}
 .xdel{border:none;background:transparent;color:var(--mut);font-size:16px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:6px}
 .xdel:hover{background:var(--bad-l);color:var(--bad)}
 .drop.has{text-align:left}
+
+.numgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.numgrid input{width:100%;min-width:0}
+@media(max-width:600px){.numgrid{grid-template-columns:1fr}}

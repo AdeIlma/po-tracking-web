@@ -263,8 +263,15 @@ const slotOf=k=>SLOTS.find(S=>S.k===k);
 
 /* ---- daftar dokumen per slot: {saved,name,no,total,file,pages,isPdf,asset,pdf,at,by} ---- */
 const docs={};SLOTS.forEach(S=>docs[S.k]=[]);
-const numList=sel=>$(sel).value.split(/[\s,;+]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
-function setNums(sel,arr){$(sel).value=[...new Set(arr.filter(Boolean))].join(', ')}
+const NUMG={mPo:'grpPo',mGr:'grpGr'};
+function numInputs(sel){const id=sel.replace('#','');const g=NUMG[id]?$('#'+NUMG[id]):null;return g?[...g.querySelectorAll('input')]:[$(sel)]}
+function numList(sel){const out=[];numInputs(sel).forEach(el=>el.value.split(/[\s,;+]+/).forEach(x=>{const v=x.trim().toUpperCase();if(v&&!out.includes(v))out.push(v)}));return out}
+function setNums(sel,arr){arr=[...new Set(arr.filter(Boolean))];const id=sel.replace('#','');const g=NUMG[id]?$('#'+NUMG[id]):null;
+  if(!g){$(sel).value=arr.join(', ');return}
+  let inputs=[...g.querySelectorAll('input')];
+  while(inputs.length<arr.length){const n=document.createElement('input');n.className='mono';n.placeholder=(id==='mPo'?'PO':'GR')+'… dokumen '+(inputs.length+1);g.appendChild(n);inputs=[...g.querySelectorAll('input')]}
+  inputs.forEach((el,i)=>el.value=arr[i]||'');
+  while(inputs.length>2&&!inputs[inputs.length-1].value){inputs[inputs.length-1].remove();inputs=[...g.querySelectorAll('input')]}}
 function addNum(sel,no){if(!no)return false;const cur=numList(sel);if(cur.includes(no))return false;cur.push(no);setNums(sel,cur);return true}
 
 SLOTS.forEach(S=>{const d=$('#'+S.drop),f=$('#'+S.file);
