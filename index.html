@@ -131,18 +131,18 @@
     </div>
     <div class="stamp" id="stTunggu"></div>
   </div>
-  <h3 style="font-size:12.5px;margin:16px 0 8px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Dokumen: PO · GR · Invoice fisik · Invoice ESB <span style="text-transform:none;font-weight:400">— nomor, tanggal &amp; total terisi otomatis dari PDF ESB. PO/GR boleh lebih dari satu dokumen untuk satu invoice.</span></h3>
+  <h3 style="font-size:12.5px;margin:16px 0 8px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Dokumen: PO · GR · Invoice fisik · Invoice ESB <span style="text-transform:none;font-weight:400">— PDF ESB dibaca dari teksnya; nota/kwitansi fisik dibaca dengan AI. PO, GR, dan invoice fisik boleh lebih dari satu dokumen untuk satu invoice (totalnya dijumlahkan).</span></h3>
   <div class="cmp4">
     <div><div class="drop" id="dropP">🧾 <b>Dokumen PO</b><br><span class="sub">PDF PO dari ESB · bisa lebih dari 1 (barang susulan)</span><input type="file" id="fileP" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total PO (Rp)<input id="totP" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiP"></div></div>
     <div><div class="drop" id="dropG">📦 <b>Dokumen GR</b><br><span class="sub">PDF Goods Receipt · bisa lebih dari 1 · arsip saja</span><input type="file" id="fileG" accept="image/*,application/pdf" hidden></div>
       <div class="sub" id="aiG" style="margin-top:8px"></div></div>
-    <div><div class="drop" id="dropF">📄 <b>Invoice / Surat Jalan FISIK</b><br><span class="sub">foto atau PDF dari distributor</span><input type="file" id="fileF" accept="image/*,application/pdf" hidden></div>
+    <div><div class="drop" id="dropF">📄 <b>Invoice / Surat Jalan FISIK</b><br><span class="sub">foto, scan atau PDF · total dibaca otomatis</span><input type="file" id="fileF" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total Invoice Fisik (Rp)<input id="totF" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiF"></div></div>
     <div><div class="drop" id="dropE">🖥️ <b>Invoice ESB</b><br><span class="sub">PDF Purchase Invoice dari ESB</span><input type="file" id="fileE" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total Invoice ESB (Rp)<input id="totE" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiE"></div></div>
   </div>
-  <div class="row" style="margin-top:8px"><button class="btn p" id="btnAI">🔍 Baca total dengan AI</button><span class="sub">untuk foto/scan (mis. invoice fisik) yang tidak terbaca otomatis; hasil bisa dikoreksi manual</span></div>
+  <div class="row" style="margin-top:8px"><button class="btn p" id="btnAI">🔍 Baca ulang total dengan AI</button><span class="sub">nota/kwitansi fisik dibaca otomatis saat diupload — tombol ini untuk membaca ulang. <b>Selalu cocokkan angkanya dengan dokumen asli.</b></span></div>
   <div class="res mut" id="cRes" style="margin-top:10px">Upload / isi yang sudah ada — boleh disimpan sebagian</div>
   <label class="f" style="margin-top:8px">Catatan cek<input id="cNote" placeholder="opsional"></label>
   <div class="row" style="margin-top:14px;justify-content:flex-end">

@@ -231,7 +231,7 @@ $('#mSimpan').onclick=async()=>{
   const any=anyDoc||TOT_SLOTS.some(S=>t[S.k]!=null)||note;
   if(any){const e=evalCek(t);const cek={note,status:e.status,selisih:e.selisih,detail:e.detail||'',missing:e.missing};
     SLOTS.forEach(S=>{const list=docs[S.k].filter(x=>x.asset);
-      cek[S.k+'_docs']=list.map(x=>({name:x.name||null,no:x.no||null,total:x.total!=null?x.total:null,asset:x.asset,pdf:!!x.pdf,at:x.at||old[S.k+'_at']||now,by:x.by||old[S.k+'_by']||uid,npages:x.npages||1}));
+      cek[S.k+'_docs']=list.map(x=>({name:x.name||null,no:x.no||null,total:x.total!=null?x.total:null,src:x.src||null,label:x.aiLabel||null,asset:x.asset,pdf:!!x.pdf,at:x.at||old[S.k+'_at']||now,by:x.by||old[S.k+'_by']||uid,npages:x.npages||1}));
       const tv=S.tot?t[S.k]:null;const first=list[0]||null;
       if(tv!==(old['total_'+S.k]??null))anyChanged=true;
       cek['total_'+S.k]=tv;cek[S.k+'_asset']=first?first.asset:null;cek[S.k+'_pdf']=first?!!first.pdf:false;
@@ -288,7 +288,7 @@ $('#btnCsv').onclick=async()=>{
 
 const SLOTS=[{k:'po',drop:'dropP',file:'fileP',tot:'totP',ai:'aiP',num:'mPo',multi:true,label:'Dokumen PO',icon:'🧾',desc:'dokumen Purchase Order (PO) dari sistem ESB',hint:'PDF PO dari ESB · bisa lebih dari 1 (barang susulan)'},
  {k:'gr',drop:'dropG',file:'fileG',tot:null,ai:'aiG',num:'mGr',multi:true,label:'Dokumen GR',icon:'📦',desc:'dokumen Goods Receipt dari sistem ESB',hint:'PDF Goods Receipt · bisa lebih dari 1 · arsip saja'},
- {k:'fisik',drop:'dropF',file:'fileF',tot:'totF',ai:'aiF',num:null,multi:false,label:'Invoice / Surat Jalan FISIK',icon:'📄',desc:'invoice atau surat jalan fisik dari distributor/supplier (foto/scan)',hint:'foto atau PDF dari distributor'},
+ {k:'fisik',drop:'dropF',file:'fileF',tot:'totF',ai:'aiF',num:null,multi:true,ai_auto:true,label:'Invoice / Surat Jalan FISIK',icon:'📄',desc:'nota / kwitansi / faktur / struk dari distributor',hint:'foto, scan atau PDF · total dibaca otomatis'},
  {k:'esb',drop:'dropE',file:'fileE',tot:'totE',ai:'aiE',num:'mInv',multi:false,label:'Invoice ESB',icon:'🖥️',desc:'purchase invoice di sistem ESB',hint:'PDF Purchase Invoice dari ESB'}];
 const TOT_SLOTS=SLOTS.filter(S=>S.tot);
 const SLOT_SHORT={po:'PO',gr:'GR',fisik:'Fisik',esb:'ESB'};
@@ -332,6 +332,8 @@ async function takeFiles(fileList,S){
     }catch(e){toast('Gagal membaca '+file.name+': '+e.message)}
   }
   renderDrop(S);recalcSlot(S);
+  if(S.tot){const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.total==null&&!e.aiTried);
+    for(const e of need){if(!S.ai_auto&&e.parsed&&e.parsed.type)continue;e.aiTried=true;await aiRead(S,e)}}
 }
 function renderDrop(S){
   const d=$('#'+S.drop),list=docs[S.k];
@@ -340,7 +342,7 @@ function renderDrop(S){
   const rows=list.map((e,i)=>{
     const u=e.saved?(e.pdf?null:burl(e.asset)):(e.pages?URL.createObjectURL(e.pages[0]):null);
     const thumbHtml=e.saved&&e.pdf?'<span class="filepdf">PDF</span>':(u?`<img class="thumb" ${e.saved?'data-burl="'+e.asset+'"':''} src="${u}">`:'<span class="filepdf">DOC</span>');
-    const meta=[e.no?'<b>'+esc(e.no)+'</b>':'',e.total!=null?fmtRp(e.total):'',e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
+    const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
     const link=e.saved?`<a href="${burl(e.asset)||'#'}" data-burl="${e.asset}" target="_blank" onclick="event.stopPropagation()">buka</a>`:'';
     return `<div class="filerow">${thumbHtml}<div class="fileinfo"><div class="filename">${esc(e.name||('dokumen '+(i+1)))}</div><div class="sub">${meta} ${link}</div></div><button type="button" class="xdel" data-del="${S.k}:${i}" title="hapus dokumen">×</button></div>`;
   }).join('');
@@ -370,7 +372,7 @@ function recalcSlot(S,silent){
         if(!$('#mSup').value.trim()&&r.supplier)$('#mSup').value=r.supplier;
         if(r.inv_dist)$('#mDist').value=r.inv_dist;
         if(r.date)parsedDates.esb=r.date;
-      }else if(S.k==='fisik'){if(e.total==null&&r.total!=null)e.total=r.total}
+      }else if(S.k==='fisik'){if(e.total==null&&r.total!=null){e.total=r.total;e.src='teks'}}
     }
     if(S.num&&e.no)addNum('#'+S.num,e.no);
   });
@@ -438,22 +440,59 @@ function calcRes(){const t=totals(),r=$('#cRes'),e=evalCek(t);const have=TOT_SLO
   if(e.status==='MENUNGGU'&&have.length<2){r.className='res '+(have.length?'warn':'mut');r.textContent=have.length?'⏳ '+line+' — menunggu '+e.missing.join(', ')+' untuk dibandingkan (boleh Simpan)':'Upload dokumen — nomor & total terisi otomatis dari PDF ESB; boleh disimpan sebagian';return e}
   if(e.status==='MENUNGGU'){r.className='res warn';r.innerHTML='✅ '+e.detail+' <span class="sub" style="font-weight:400">(boleh Simpan)</span><div class="sub" style="font-weight:400;margin-top:4px">'+line+'</div>';return e}
   r.className='res '+(e.ok?'ok':'bad');r.innerHTML=(e.ok?'✅ MATCH — PO = Fisik = ESB = '+fmtRp(t.esb):'❌ SELISIH — '+e.detail)+'<div class="sub" style="font-weight:400;margin-top:4px">'+line+'</div>';return e}
+const AI_PROMPT_FISIK=`Kamu membaca dokumen tagihan dari distributor/supplier di Indonesia. Bentuknya bisa: invoice cetak (dot matrix), faktur penjualan, nota tulis tangan, kwitansi, struk toko grosir, atau surat jalan. Dokumen bisa terdiri dari beberapa halaman/gambar berurutan.
+
+TUGAS: temukan NILAI AKHIR YANG HARUS DIBAYAR dalam Rupiah.
+
+ATURAN:
+- Ambil angka yang berlabel: "Total", "TOTAL", "Total :", "Grand Total", "Jumlah", "Jumlah Total", "Total Harus Dibayar", "TOTAL HARUS DIBAYAR", "Total Tagihan", "Total Bayar", "Nilai Invoice". Biasanya angka terbesar dan paling bawah.
+- Jika ada potongan/diskon, ambil nilai SESUDAH diskon. Contoh urutan pada struk: "TOTAL SUM" lalu "TOTAL DISKON" lalu "TOTAL HARUS DIBAYAR" -> ambil TOTAL HARUS DIBAYAR.
+- Jika ada DPP/Subtotal lalu PPN dan/atau embalase lalu "Total", ambil "Total" paling akhir (yang sudah termasuk PPN), bukan DPP atau subtotal.
+- Pada nota tulis tangan, total biasanya di baris paling bawah kolom kanan, sering digarisbawahi atau ditulis lebih besar. Baca angka tulisan tangan dengan hati-hati.
+- Jika ada tulisan terbilang (mis. "Delapan Juta Delapan Ratus Ribu Rupiah"), pakai untuk memastikan angka yang kamu baca benar.
+- ABAIKAN angka yang merupakan jumlah barang, bukan uang: kolom Qty/Kts/Jumlah/Satuan, "339 Dos", "TOTAL 372", jumlah karton/dus/botol, nomor dokumen, nomor rekening, NPWP, dan tanggal.
+- Jika dokumen hanya surat jalan tanpa nilai rupiah sama sekali, balas total null dan note "surat jalan tanpa nilai rupiah".
+- Format angka Indonesia: titik = pemisah ribuan, koma = desimal. Balas angka murni tanpa titik/koma, contoh: 40796000.
+
+Balas HANYA JSON:
+{"total": number|null, "label": string|null, "doc_no": string|null, "supplier": string|null, "tanggal": string|null, "confidence": "tinggi"|"sedang"|"rendah", "note": string}
+"label" = tulisan persis yang ada di dokumen untuk angka itu, misal "Total :" atau "TOTAL HARUS DIBAYAR".`;
+
+const AI_PROMPT_ESB=`Kamu membaca ${'${desc}'}. Dokumen bisa terdiri dari beberapa halaman (gambar berurutan); total akhir biasanya ada di halaman terakhir. Temukan TOTAL AKHIR / GRAND TOTAL dokumen ini (setelah diskon dan PPN bila ada; bukan subtotal, bukan DPP, bukan total per halaman). Angka dalam Rupiah, balas angka murni tanpa titik/koma.
+Balas HANYA JSON: {"total": number|null, "label": string|null, "doc_no": string|null, "supplier": string|null, "confidence": "tinggi"|"sedang"|"rendah", "note": string}`;
+
+async function aiRead(S,e){
+  if(!sample){$('#'+S.ai).innerHTML='<span class="warnx">Pembacaan AI belum aktif — isi total manual (lihat config.js)</span>';return false}
+  e.reading=true;renderDrop(S);
+  const prompt=S.k==='fisik'?AI_PROMPT_FISIK:AI_PROMPT_ESB.replace('${desc}',S.desc);
+  try{
+    const r=await sample.json(prompt,e.pages);
+    e.reading=false;
+    if(r&&r.total!=null&&!isNaN(Number(r.total))){
+      e.total=Number(r.total);e.src='AI';e.aiLabel=r.label||'';e.conf=r.confidence||'';
+      if(!e.no&&r.doc_no)e.no=String(r.doc_no).toUpperCase();
+      if(S.k==='fisik'&&r.doc_no&&!$('#mDist').value.trim())$('#mDist').value=String(r.doc_no);
+      if(S.k==='fisik'&&r.supplier&&!$('#mSup').value.trim())$('#mSup').value=r.supplier;
+      renderDrop(S);recalcSlot(S,true);
+      $('#'+S.ai).innerHTML='✓ AI: '+esc(e.name)+' → <b>'+fmtRp(e.total)+'</b>'+(r.label?' <span class="sub">('+esc(r.label)+')</span>':'')+(r.confidence&&r.confidence!=='tinggi'?' <span class="warnx">· keyakinan '+esc(r.confidence)+', mohon dicek</span>':' <span class="sub">· cek sekali lagi dengan dokumennya</span>');
+      return true;
+    }
+    renderDrop(S);
+    $('#'+S.ai).innerHTML='<span class="warnx">AI tidak menemukan total di '+esc(e.name)+(r&&r.note?' ('+esc(r.note)+')':'')+' — isi manual</span>';
+    return false;
+  }catch(err){e.reading=false;renderDrop(S);
+    $('#'+S.ai).innerHTML='<span class="warnx">AI gagal ('+esc(err.code||err.message||'')+') — isi total manual</span>';return false}
+}
 $('#btnAI').onclick=async()=>{
-  const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach((e,i)=>{if(!e.saved&&e.total==null&&(S.k==='fisik'||!e.parsed||e.parsed.total==null))jobs.push([S,e,i])}));
-  if(!jobs.length)return toast('Tidak ada dokumen yang perlu dibaca AI (total sudah terisi otomatis)');
+  const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach(e=>{if(!e.saved&&e.pages&&S.tot)jobs.push([S,e])}));
+  if(!jobs.length)return toast('Tidak ada dokumen baru untuk dibaca AI');
   $('#btnAI').disabled=true;
-  for(const [S,e] of jobs){$('#'+S.ai).textContent='⏳ AI membaca '+e.name+'…';
-    try{const r=await sample.json(`Kamu membaca ${S.desc}. Dokumen bisa terdiri dari beberapa halaman (gambar berurutan); total akhir biasanya ada di halaman terakhir. Temukan TOTAL AKHIR / GRAND TOTAL dokumen ini (setelah diskon dan PPN bila ada; bukan subtotal, bukan DPP, bukan total per halaman). Angka dalam Rupiah. Balas HANYA JSON: {"total": number|null, "doc_no": string|null, "supplier": string|null, "ppn": boolean|null, "note": string}. Jika ada beberapa kandidat, pilih yang berlabel Total/Grand Total/Total Tagihan/Jumlah yang harus dibayar.`,e.pages);
-      if(r&&r.total!=null){e.total=r.total;if(!e.no&&r.doc_no)e.no=String(r.doc_no).toUpperCase();$('#'+S.ai).textContent='AI: '+e.name+' → '+fmtRp(r.total)+(r.ppn?' (termasuk PPN)':'')}
-      else $('#'+S.ai).textContent='AI tidak menemukan total di '+e.name+' — isi manual';
-    }catch(err){$('#'+S.ai).textContent='AI gagal ('+(err.code||err.message)+') — isi manual'}
-    renderDrop(S);recalcSlot(S,true);
-  }
+  for(const [S,e] of jobs)await aiRead(S,e);
   $('#btnAI').disabled=false;
 };
 function resetCek(){parsedDates={};SLOTS.forEach(S=>{docs[S.k]=[];if(S.tot)$('#'+S.tot).value='';$('#'+S.ai).textContent='';renderDrop(S)});$('#cNote').value='';calcRes()}
 function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
-  if(arr.length)docs[S.k]=arr.map(x=>({saved:true,name:x.name||S.label,no:x.no||null,total:x.total!=null?Number(x.total):null,asset:x.asset,pdf:!!x.pdf,at:x.at,by:x.by,npages:x.npages||1}));
+  if(arr.length)docs[S.k]=arr.map(x=>({saved:true,name:x.name||S.label,no:x.no||null,total:x.total!=null?Number(x.total):null,asset:x.asset,pdf:!!x.pdf,at:x.at,by:x.by,npages:x.npages||1,src:x.src||null,aiLabel:x.label||null}));
   else if(c&&c[S.k+'_asset'])docs[S.k]=[{saved:true,name:S.label,no:null,total:(c['total_'+S.k]!=null?Number(c['total_'+S.k]):null),asset:c[S.k+'_asset'],pdf:!!c[S.k+'_pdf'],at:c[S.k+'_at'],by:c[S.k+'_by'],npages:1}];
   renderDrop(S)})}
 
