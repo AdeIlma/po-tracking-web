@@ -194,7 +194,7 @@ function openModal(p,focus){
   st($('#stPo'),p?.po_at,p?.po_by);st($('#stGr'),p?.gr_at,p?.gr_by);st($('#stInv'),p?.inv_at,p?.inv_by);
   $('#mTunggu').checked=!!(p&&p.tunggu_inv);$('#mTerima').value=p?(p.barang_terima||''):'';$('#mInvTerima').value=p&&p.inv_terima_at?p.inv_terima_at.slice(0,10):'';
   $('#stTunggu').innerHTML=p&&p.tunggu_inv_at?('⏱ ditandai menunggu sejak <b>'+jkt(p.tunggu_inv_at)+'</b>'+(p.tunggu_inv_selesai?' · selesai '+jkt(p.tunggu_inv_selesai):'')):'';
-  $('#mHapus').style.display=p&&isAdmin?'':'none';
+  $('#mHapus').style.display=p?'':'none';$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus PO ini';
   resetCek();const c=p&&p.cek;if(c){$('#cNote').value=c.note||'';
     TOT_SLOTS.forEach(S=>{const tv=c['total_'+S.k];if(tv!=null)$('#'+S.tot).value=Math.round(tv).toLocaleString('id-ID')});
     loadSavedDocs(c);calcRes()}
@@ -241,8 +241,9 @@ $('#mSimpan').onclick=async()=>{
   try{await sbSave(newId,d);if(oldId&&oldId!==newId)await sbDelete(oldId);$('#mbg').classList.remove('open');toast('Tersimpan ✓ '+jktTime(now)+(r?' · '+r:''));loadPos()}catch(e){toast('Gagal simpan: '+(e.message||e.code))}
   $('#mSimpan').disabled=false;
 };
-$('#mHapus').onclick=async()=>{if(!editing)return;if($('#mHapus').dataset.c!=='1'){$('#mHapus').dataset.c='1';$('#mHapus').textContent='Klik lagi untuk hapus';return}
-  try{await sbDelete(editing.id);$('#mbg').classList.remove('open');toast('Dihapus');loadPos()}catch(e){toast('Gagal: '+(e.message||e.code))}$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus'};
+$('#mHapus').onclick=async()=>{if(!editing)return;
+  if($('#mHapus').dataset.c!=='1'){$('#mHapus').dataset.c='1';$('#mHapus').textContent='⚠ Klik lagi: hapus '+(editing.po_no||'baris ini')+' permanen';setTimeout(()=>{if($('#mHapus').dataset.c==='1'){$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus PO ini'}},6000);return}
+  try{const no=editing.po_no||editing.id;await sbDelete(editing.id);$('#mbg').classList.remove('open');toast('Dihapus: '+no);loadPos()}catch(e){toast('Gagal menghapus: '+(e.message||e.code))}$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus'};
 
 /* ---------- Export CSV / Excel ---------- */
 function exportRows(){
