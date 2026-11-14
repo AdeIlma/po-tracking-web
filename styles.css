@@ -79,3 +79,8 @@ code{background:#F3F4F6;padding:1px 5px;border-radius:4px;font-size:12px}
 .numgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .numgrid input{width:100%;min-width:0}
 @media(max-width:600px){.numgrid{grid-template-columns:1fr}}
+
+.chips{margin-top:5px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:10.5px;color:var(--mut)}
+.chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:2px 8px;font:inherit;font-size:10.5px;font-weight:600;cursor:pointer;color:var(--ink)}
+.chip:hover{border-color:var(--red);color:var(--red)}
+.chip.on{background:var(--ok-l);border-color:var(--ok);color:var(--ok)}

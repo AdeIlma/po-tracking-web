@@ -79,6 +79,8 @@
       <label class="f">Target PO → GR (jam)<input type="number" id="sGr" min="1"></label>
       <label class="f">Target GR → Invoice (jam)<input type="number" id="sInv" min="1"></label>
       <label class="f">Toleransi selisih total (Rp)<input type="number" id="sTol" min="0"></label>
+      <label class="f" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="sAiAuto" style="width:16px;height:16px" checked> Jalankan AI otomatis untuk foto/scan yang totalnya tidak terbaca dari teks <span class="sub" style="font-weight:400">(matikan bila ingin hemat kuota — AI hanya jalan saat tombol ditekan)</span></label>
+      <label class="f" style="grid-column:1/-1">Kata kunci total tambahan <span class="sub" style="font-weight:400">(opsional, pisahkan dengan koma — untuk distributor yang memakai istilah lain, mis. <i>Total Bayar, Nilai Nota, Jumlah Tagihan</i>)</span><input id="sLabel" placeholder="Total Bayar, Nilai Nota"></label>
     </div>
     <div class="row" style="margin-top:10px"><button class="btn p" id="btnSaveSet">Simpan setting</button><span class="sub" id="setInfo">Hanya Editor/Owner yang bisa mengubah.</span></div>
   </div>
@@ -165,7 +167,11 @@
     <div><div class="drop" id="dropE">🖥️ <b>Invoice ESB</b><br><span class="sub">PDF Purchase Invoice dari ESB</span><input type="file" id="fileE" accept="image/*,application/pdf" hidden></div>
       <label class="f" style="margin-top:8px">Total Invoice ESB (Rp)<input id="totE" inputmode="numeric" placeholder="0"></label><div class="sub" id="aiE"></div></div>
   </div>
-  <div class="row" style="margin-top:8px"><button class="btn p" id="btnAI">🔍 Baca ulang total dengan AI</button><span class="sub">nota/kwitansi fisik dibaca otomatis saat diupload — tombol ini untuk membaca ulang. <b>Selalu cocokkan angkanya dengan dokumen asli.</b></span></div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn" id="btnText">🔤 Baca dari teks dokumen</button>
+    <button class="btn p" id="btnAI">🤖 Baca dengan AI</button>
+    <span class="sub" style="flex:1">Teks = gratis &amp; langsung, untuk PDF asli. AI = untuk foto/scan, memakai kuota Gemini. <b>Selalu cocokkan angkanya dengan dokumen asli.</b><br><span id="aiCount" class="sub"></span></span>
+  </div>
   <div class="res mut" id="cRes" style="margin-top:10px">Upload / isi yang sudah ada — boleh disimpan sebagian</div>
   <label class="f" style="margin-top:8px">Catatan cek<input id="cNote" placeholder="opsional"></label>
   <div class="row" style="margin-top:14px;justify-content:flex-end">

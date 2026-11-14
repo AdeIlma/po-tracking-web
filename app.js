@@ -34,7 +34,7 @@ function fromRow(r){const d={...r};['po_at','gr_at','inv_at','inv_terima_at','tu
 async function sbSave(id,d){const {error}=await sb.from('po').upsert(toRow(id,d));if(error)throw error}
 async function sbDelete(id){const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error}
 async function loadPos(){const {data,error}=await sb.from('po').select('*').order('created',{ascending:false}).limit(5000);if(error){toast('Gagal memuat PO: '+error.message);logFail('muat',error.message);return}POS=data.map(fromRow);render()}
-async function loadSettings(){const {data}=await sb.from('settings').select('*').eq('id',1).maybeSingle();if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi)}}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
+async function loadSettings(){const {data}=await sb.from('settings').select('*').eq('id',1).maybeSingle();if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi),label_total:data.label_total||'',ai_auto:data.ai_auto!==false};$('#sLabel').value=SET.label_total;$('#sAiAuto').checked=SET.ai_auto}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
 async function loadProfiles(){const {data}=await sb.from('profiles').select('id,display_name,email,role');(data||[]).forEach(p=>{names[p.id]=p.display_name||(p.email||'').split('@')[0]||'Petugas';if(p.id===uid)isAdmin=p.role==='admin'})}
 const urlCache={};
 function burl(id){if(!id)return '';if(id in urlCache)return urlCache[id];urlCache[id]='';sb.storage.from(BUCKET).createSignedUrl(id,3600).then(r=>{urlCache[id]=(r.data&&r.data.signedUrl)||'';render();if($('#mbg').classList.contains('open')&&editing)refreshModalThumbs()}).catch(()=>{});return ''}
@@ -83,9 +83,10 @@ async function geminiJson(prompt,blobs){
   const j=await res.json();const txt=(((j.candidates||[])[0]||{}).content||{}).parts?.map(p=>p.text).join('')||'';
   try{return JSON.parse(txt)}catch(e){const m=txt.match(/\{[\s\S]*\}/);return m?JSON.parse(m[0]):null}
 }
-sample={json:geminiJson};
+sample=((CFG.GEMINI_MODE||'edge')==='off')?null:{json:geminiJson};
+let aiOff=false;   // true bila kuota Gemini habis → berhenti memanggil AI sampai halaman dimuat ulang
 let uid=null,canWrite=true,isAdmin=false;
-let POS=[],SET={target_gr_h:24,target_inv_h:48,toleransi:0};
+let POS=[],SET={target_gr_h:24,target_inv_h:48,toleransi:0,label_total:'',ai_auto:true};
 const names={};
 async function resolveNames(ids){const need=[...new Set(ids.filter(i=>i&&!(i in names)))];if(!need.length||!sb)return;await loadProfiles();need.forEach(i=>{if(!(i in names))names[i]=''})}
 const nm=id=>id?(names[id]||'Petugas'):'-';
@@ -352,7 +353,10 @@ SLOTS.forEach(S=>{const d=$('#'+S.drop),f=$('#'+S.file);
   f.onchange=()=>{if(f.files.length)takeFiles(f.files,S);f.value=''};
   if(!S.tot)return;const t=$('#'+S.tot);t.addEventListener('input',calcRes);t.addEventListener('blur',()=>{const n=parseRp(t.value);t.value=n==null?'':Math.round(n).toLocaleString('id-ID');calcRes()})});
 
-document.addEventListener('click',e=>{const b=e.target.closest('[data-del]');if(!b)return;e.stopPropagation();const [k,i]=b.dataset.del.split(':');docs[k].splice(+i,1);const S=slotOf(k);renderDrop(S);recalcSlot(S,true)});
+document.addEventListener('click',e=>{const p=e.target.closest('[data-pick]');
+  if(p){e.stopPropagation();const [k,i,ci]=p.dataset.pick.split(':');const S=slotOf(k),ent=docs[k][+i];const c=ent.cands[+ci];
+    ent.total=c.v;ent.src='teks';ent.manual=true;ent.aiLabel=c.label;renderDrop(S);recalcSlot(S,true);toast('Total diambil dari: '+c.label);return}
+  const b=e.target.closest('[data-del]');if(!b)return;e.stopPropagation();const [k,i]=b.dataset.del.split(':');docs[k].splice(+i,1);const S=slotOf(k);renderDrop(S);recalcSlot(S,true)});
 
 const MAX_PAGES=8;
 async function takeFiles(fileList,S){
@@ -364,12 +368,15 @@ async function takeFiles(fileList,S){
     let r={pages:[],total:1,why:'tidak terbaca'};
     try{r=await toImages(file)}catch(e){r={pages:[],total:1,why:e.message||'tidak terbaca'}}
     const entry={saved:false,name:file.name,file,pages:r.pages,noPreview:!r.pages.length,why:r.why||'',isPdf:file.type==='application/pdf'||/\.pdf$/i.test(file.name),size:file.size,npages:r.total,no:null,total:null,parsed:null};
-    if(entry.isPdf&&window.pdfjsLib){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt}catch(err){console.warn('parse',err)}}
+    if(entry.isPdf&&window.pdfjsLib){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt;entry.cands=allCandidates(txt).slice(0,6);entry.txtOk=!!(entry.parsed&&entry.parsed.total!=null)}catch(err){console.warn('parse',err);logFail('muat','gagal baca teks PDF: '+(err.message||''),{file_name:(file.name||'').slice(0,120)})}}
     docs[S.k].push(entry);
   }
   renderDrop(S);recalcSlot(S);
-  if(S.tot){const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.aiTried);
+  if(S.tot&&SET.ai_auto!==false&&sample&&!aiOff){
+    const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.aiTried&&!e.txtOk);
     for(const e of need){if(!S.ai_auto&&e.parsed&&e.parsed.type)continue;e.aiTried=true;await aiRead(S,e)}}
+  else if(S.tot){const sisa=docs[S.k].filter(e=>!e.saved&&e.total==null);
+    if(sisa.length)$('#'+S.ai).innerHTML='<span class="sub">Total belum terbaca dari teks — klik <b>Baca dengan AI</b> atau pilih/ketik angkanya.</span>'}
 }
 function renderDrop(S){
   const d=$('#'+S.drop),list=docs[S.k];
@@ -378,10 +385,11 @@ function renderDrop(S){
   const rows=list.map((e,i)=>{
     const u=e.saved?(e.pdf?null:burl(e.asset)):(e.pages?URL.createObjectURL(e.pages[0]):null);
     const thumbHtml=(e.saved&&e.pdf)||(!e.saved&&e.isPdf)?'<span class="filepdf">PDF</span>':(u?`<img class="thumb" ${e.saved?'data-burl="'+e.asset+'"':''} src="${u}">`:'<span class="filepdf">FILE</span>');
-    const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
+    const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':e.src==='teks'?' <span class="sub">(dari teks'+(e.aiLabel?': '+esc(e.aiLabel):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
     const link=e.saved?`<a href="${burl(e.asset)||'#'}" data-burl="${e.asset}" target="_blank" onclick="event.stopPropagation()">buka</a>`:'';
+    const chips=(S.tot&&!e.saved&&e.cands&&e.cands.length)?'<div class="chips">Pilih angka dari dokumen: '+e.cands.map((c,ci)=>`<button type="button" class="chip${e.total!=null&&Math.abs(c.v-e.total)<0.5?' on':''}" data-pick="${S.k}:${i}:${ci}" title="${esc(c.label)}">${fmtRp(c.v)}</button>`).join('')+'</div>':'';
     const note=e.upErr?'<div class="warnx">⚠ gagal diupload: '+esc(e.upErr)+'</div>':e.noPreview?'<div class="warnx">tetap akan diupload · pratinjau &amp; baca otomatis tidak tersedia: '+esc(e.why||'')+' — isi total manual</div>':'';
-    return `<div class="filerow">${thumbHtml}<div class="fileinfo"><div class="filename">${esc(e.name||('dokumen '+(i+1)))}</div><div class="sub">${meta} ${link}</div>${note}</div><button type="button" class="xdel" data-del="${S.k}:${i}" title="hapus dokumen">×</button></div>`;
+    return `<div class="filerow">${thumbHtml}<div class="fileinfo"><div class="filename">${esc(e.name||('dokumen '+(i+1)))}</div><div class="sub">${meta} ${link}</div>${note}${chips}</div><button type="button" class="xdel" data-del="${S.k}:${i}" title="hapus dokumen">×</button></div>`;
   }).join('');
   d.innerHTML=`<div class="drophead">${S.icon} <b>${S.label}</b> <span class="b mut">${list.length} dokumen</span></div>${rows}<div class="sub" style="margin-top:6px">${S.multi?'klik untuk menambah dokumen lagi':'klik untuk mengganti dokumen'}</div>`;
 }
@@ -392,7 +400,7 @@ function recalcSlot(S,silent){
   list.forEach(e=>{
     const r=e.parsed;
     if(r){
-      if(S.k==='po'){e.no=r.po_no;e.total=r.total;
+      if(S.k==='po'){e.no=r.po_no;if(!e.manual)e.total=r.total;
         if(r.type&&r.type!=='po')warn.push(esc(e.name)+': terbaca sebagai dokumen '+(SLOT_SHORT[r.type]||r.type));
         if(r.supplier)$('#mSup').value=r.supplier;
         if(r.region)$('#mRegion').value=r.region;
@@ -402,14 +410,14 @@ function recalcSlot(S,silent){
         if(r.po_no)addNum('#mPo',r.po_no);
         if(!$('#mSup').value.trim()&&r.supplier)$('#mSup').value=r.supplier;
         if(r.date&&(!parsedDates.gr||r.date>parsedDates.gr)){parsedDates.gr=r.date;$('#mTerima').value=r.date}
-      }else if(S.k==='esb'){e.no=r.inv_no;e.total=r.total;
+      }else if(S.k==='esb'){e.no=r.inv_no;if(!e.manual)e.total=r.total;
         if(r.type&&r.type!=='esb')warn.push(esc(e.name)+': terbaca sebagai dokumen '+(SLOT_SHORT[r.type]||r.type));
         if(r.gr_no)addNum('#mGr',r.gr_no);
         if(r.po_no)addNum('#mPo',r.po_no);
         if(!$('#mSup').value.trim()&&r.supplier)$('#mSup').value=r.supplier;
         if(r.inv_dist)$('#mDist').value=r.inv_dist;
         if(r.date)parsedDates.esb=r.date;
-      }else if(S.k==='fisik'){if(e.total==null&&r.total!=null){e.total=r.total;e.src='teks'}}
+      }else if(S.k==='fisik'){if(e.total==null&&r.total!=null){e.total=r.total;e.src='teks';e.aiLabel=r.total_label||''}}
     }
     if(S.num&&e.no)addNum('#'+S.num,e.no);
   });
@@ -449,6 +457,99 @@ async function toImages(file){
     const b=await canvasToJpeg(im);URL.revokeObjectURL(url);return {pages:[b],total:1};
   }catch(e){return {pages:[],total:1,why:(e.message||'gambar tidak terbaca')+' (mis. foto HEIC dari iPhone)'}}
 }
+async function pdfText(file){const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';for(let i=1;i<=Math.min(pdf.numPages,MAX_PAGES);i++){const c=await (await pdf.getPage(i)).getTextContent();text+=c.items.map(it=>it.str).join(' ')+'\n'}return text}
+function parseEsb(text){
+  const t=text.replace(/\s+/g,' ');
+  const num=s=>{if(!s)return null;s=s.trim();if(/,\d{1,2}$/.test(s))s=s.replace(/\./g,'').replace(',','.');else s=s.replace(/[.,]/g,'');const n=parseFloat(s);return isNaN(n)?null:n};
+  const r={type:null,po_no:null,gr_no:null,inv_no:null,total:null,supplier:null,region:null,inv_dist:null,date:null};
+  if(/Purchase Invoice/i.test(t)&&/\bVI\d{10,}/.test(t))r.type='esb';else if(/Goods Receipt/i.test(t)&&/\bGR\d{10,}/.test(t))r.type='gr';else if(/Purchase Order/i.test(t)&&/\bPO\d{10,}/.test(t))r.type='po';
+  const m=(re)=>{const x=t.match(re);return x?x[1].trim():null};
+  r.po_no=m(/\b(PO\d{10,})\b/);r.gr_no=m(/\b(GR\d{10,})\b/);r.inv_no=m(/\b(VI\d{10,})\b/);
+  if(r.type==='po')r.total=num(m(/Grand Total\s*:?\s*([\d.]+,\d{2})/i));
+  if(r.type==='esb')r.total=num(m(/Invoice Total\s*:?\s*([\d.]+,\d{2})/i));
+  if(r.total==null){const x=extractTotal(t);if(x.total!=null){r.total=x.total;r.total_label=x.label}}
+  r.supplier=m(/(?:Supplier|Source)\s*:\s*((?:JKT|BLI|JOG|JTM|JTG|PT\.?|CV\.?)[^:]*?)\s+(?:Purchase Date|Invoice Due|Currency|Delivery Number|Cost Center|Branch|Address|Invoice Date|Reference Date)\b/i)
+    ||m(/\b((?:JKT|BLI|JOG|JTM|JTG)\s*-\s*[A-Z0-9][A-Z0-9 .,()&'-]{3,}?)(?=\s+(?:Purchase|Invoice|Currency|Delivery|Reference|Branch|Cost|Address)\b)/);
+  if(r.supplier)r.supplier=r.supplier.replace(/\s+(?:Invoice Due Date.*|Purchase Date.*)$/i,'').trim();
+  const br=m(/WAREHOUSE\s+(JELUPANG|BALI|JOGJA|YOGYAKARTA|JATENG|JATIM|SEMARANG|SURABAYA|JAKARTA)/i);
+  if(br){const b=br.toUpperCase();r.region=b==='JOGJA'?'YOGYAKARTA':b==='SEMARANG'?'JATENG':b==='SURABAYA'?'JATIM':b==='JAKARTA'?'JELUPANG':b}
+  if(r.type==='esb'){r.inv_dist=m(/Supplier Invoice\s*(?:Number)?\s*:\s*([A-Z0-9][A-Z0-9\/._-]{2,})/i);if(r.inv_dist&&/^Number$/i.test(r.inv_dist))r.inv_dist=null;}
+  const dd=m(/(?:Purchase Date|GR Date|Invoice Date)\s*:\s*(\d{2}\/[A-Za-z]{3}\/\d{4})/);
+  if(dd){const MO={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',mei:'05',jun:'06',jul:'07',aug:'08',agu:'08',sep:'09',oct:'10',okt:'10',nov:'11',dec:'12',des:'12'};const [d_,mo,y]=dd.split('/');r.date=MO[mo.toLowerCase()]?y+'-'+MO[mo.toLowerCase()]+'-'+d_:null}
+  return r;
+}
+let parsedDates={};
+
+/* ====== Pembacaan total TANPA AI: aturan if/else atas teks dokumen ====== */
+function parseMoney(str){
+  let s=String(str||'').replace(/\s/g,'').replace(/rp\.?/ig,'');
+  if(!/\d/.test(s))return null;
+  const lastDot=s.lastIndexOf('.'),lastCom=s.lastIndexOf(',');
+  let dec=-1;
+  if(lastDot>lastCom&&/\.\d{1,2}$/.test(s))dec=lastDot;
+  else if(lastCom>lastDot&&/,\d{1,2}$/.test(s))dec=lastCom;
+  const intPart=(dec>=0?s.slice(0,dec):s).replace(/[^\d]/g,'');
+  const frac=dec>=0?s.slice(dec+1).replace(/[^\d]/g,''):'';
+  if(!intPart)return null;
+  const n=parseFloat(intPart+(frac?'.'+frac:''));
+  return isNaN(n)?null:n;
+}
+// label yang BUKAN nilai tagihan akhir
+const NOT_TOTAL=/sub\s*total|total\s*(?:qty|item|barang|dus|karton|pcs|botol|lembar|kuantitas|diskon|discount|potongan|sum|pajak|ppn)|diskon|discount|potongan|dpp|ppn|pajak|embalase|uang\s*muka|sisa|kembali|kembalian|tunai|qty|kts|jumlah\s*(?:barang|dus|karton|pcs|botol|item)/i;
+const TOTAL_RULES=[
+  {w:100,re:/total\s*(?:yang\s*)?(?:harus\s*)?di\s*?bayar\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:100,re:/total\s*tagihan\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:98 ,re:/jumlah\s*(?:yang\s*)?(?:harus\s*)?di\s*?bayar\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:95 ,re:/grand\s*total\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:95 ,re:/invoice\s*total\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:90 ,re:/total\s*(?:invoice|faktur|nota|akhir|keseluruhan|net)\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:60 ,re:/(?:^|[^a-z])total\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:45 ,re:/(?:^|[^a-z])jumlah\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+  {w:35 ,re:/nilai\s*(?:invoice|faktur|tagihan)?\s*:?\s*(?:rp\.?)?\s*([\d][\d.,]{3,})/ig},
+];
+function customRules(){
+  const raw=(SET.label_total||'').split(/[,;\n]+/).map(x=>x.trim()).filter(Boolean);
+  return raw.map(lbl=>({w:90,re:new RegExp(lbl.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s*')+'\\s*:?\\s*(?:rp\\.?)?\\s*([\\d][\\d.,]{3,})','ig')}));
+}
+function allCandidates(text){
+  if(!text)return [];
+  const t=String(text).replace(/\u00a0/g,' ').replace(/\s+/g,' ');
+  const out=[];
+  [...TOTAL_RULES,...customRules()].forEach(rule=>{rule.re.lastIndex=0;let m;
+    while((m=rule.re.exec(t))!==null){
+      const numStr=String(m[1]);const label=m[0].slice(0,m[0].length-numStr.length).trim();
+      const pre=t.slice(Math.max(0,m.index-5),m.index);
+      if(NOT_TOTAL.test(label)||/sub\s*$/i.test(pre))continue;
+      const v=parseMoney(numStr);if(v==null||v<1000)continue;
+      out.push({v,w:rule.w,i:m.index,label:label.replace(/^[^A-Za-z]+/,'')||'Total'});
+    }});
+  const re=/([\d]{1,3}(?:[.,]\d{3}){1,}(?:[.,]\d{1,2})?)/g;let m2;
+  while((m2=re.exec(t))!==null){const v=parseMoney(m2[1]);if(v==null||v<10000)continue;
+    if(!out.some(o=>Math.abs(o.v-v)<0.5))out.push({v,w:5,i:m2.index,label:'angka di dokumen'});}
+  out.sort((a,b)=>b.w-a.w||b.i-a.i);
+  const seen=new Set();return out.filter(o=>{const k=Math.round(o.v*100);if(seen.has(k))return false;seen.add(k);return true});
+}
+function extractTotal(text){
+  if(!text)return {total:null,label:null};
+  const t=String(text).replace(/ /g,' ').replace(/\s+/g,' ');
+  const cands=[];
+  [...TOTAL_RULES,...customRules()].forEach(rule=>{
+    rule.re.lastIndex=0;let m;
+    while((m=rule.re.exec(t))!==null){
+      const numStr=String(m[1]);
+      const label=m[0].slice(0,m[0].length-numStr.length).trim();   // hanya labelnya, bukan teks sebelumnya
+      const pre=t.slice(Math.max(0,m.index-5),m.index);
+      if(NOT_TOTAL.test(label)||/sub\s*$/i.test(pre))continue;
+      const v=parseMoney(numStr);
+      if(v==null||v<1000)continue;           // angka kecil = jumlah barang, bukan uang
+      cands.push({v,w:rule.w,i:m.index,label:label.replace(/^[^A-Za-z]+/,'')||'Total'});
+    }
+  });
+  if(!cands.length)return {total:null,label:null};
+  cands.sort((a,b)=>b.w-a.w||b.i-a.i);
+  return {total:cands[0].v,label:cands[0].label||'Total'};
+}
+
 function totals(){const t={};TOT_SLOTS.forEach(S=>t[S.k]=parseRp($('#'+S.tot).value));return t}
 function evalCek(t){const tol=SET.toleransi||0;const have=TOT_SLOTS.filter(S=>t[S.k]!=null);const missing=TOT_SLOTS.filter(S=>t[S.k]==null).map(S=>SLOT_SHORT[S.k]);
   const pairs=[['po','fisik'],['fisik','esb'],['po','esb']];const bad=[],good=[];
@@ -484,14 +585,15 @@ const AI_PROMPT_ESB=`Kamu membaca ${'${desc}'}. Dokumen bisa terdiri dari bebera
 Balas HANYA JSON: {"total": number|null, "label": string|null, "doc_no": string|null, "supplier": string|null, "confidence": "tinggi"|"sedang"|"rendah", "note": string}`;
 
 async function aiRead(S,e){
-  if(!sample){$('#'+S.ai).innerHTML='<span class="warnx">Pembacaan AI belum aktif — isi total manual (lihat config.js)</span>';return false}
+  if(!sample){$('#'+S.ai).innerHTML='<span class="warnx">Pembacaan AI tidak aktif — isi total manual</span>';return false}
+  if(aiOff){$('#'+S.ai).innerHTML='<span class="warnx">Kuota AI habis — isi total manual</span>';return false}
   e.reading=true;renderDrop(S);
   const prompt=S.k==='fisik'?AI_PROMPT_FISIK:AI_PROMPT_ESB.replace('${desc}',S.desc);
   try{
     const r=await sample.json(prompt,e.pages);
     e.reading=false;
     if(r&&r.total!=null&&!isNaN(Number(r.total))){
-      e.total=Number(r.total);e.src='AI';e.aiLabel=r.label||'';e.conf=r.confidence||'';
+      e.total=Number(r.total);e.src='AI';e.manual=true;e.aiLabel=r.label||'';e.conf=r.confidence||'';
       if(!e.no&&r.doc_no)e.no=String(r.doc_no).toUpperCase();
       if(S.k==='fisik'&&r.doc_no&&!$('#mDist').value.trim())$('#mDist').value=String(r.doc_no);
       if(S.k==='fisik'&&r.supplier&&!$('#mSup').value.trim())$('#mSup').value=r.supplier;
@@ -502,17 +604,34 @@ async function aiRead(S,e){
     renderDrop(S);
     $('#'+S.ai).innerHTML='<span class="warnx">AI tidak menemukan total di '+esc(e.name)+(r&&r.note?' ('+esc(r.note)+')':'')+' — isi manual</span>';
     return false;
-  }catch(err){e.reading=false;renderDrop(S);
-    logFail('ai',err.message||err.code,{file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null});
+  }catch(err){e.reading=false;const msg=String(err.message||err.code||'');
+    const kuota=/429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg);
+    if(kuota)aiOff=true;
+    renderDrop(S);
+    logFail('ai',kuota?('kuota Gemini habis (429)'):msg,{file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null});
+    if(kuota){$('#'+S.ai).innerHTML='<span class="warnx">Kuota Gemini habis hari ini — isi total manual. (Dokumen PDF yang ada teksnya tetap terbaca otomatis tanpa AI.)</span>';return false}
     $('#'+S.ai).innerHTML='<span class="warnx">AI gagal ('+esc(err.code||err.message||'')+') — isi total manual</span>';return false}
 }
+$('#btnText').onclick=()=>{
+  let n=0,gagal=0;
+  SLOTS.forEach(S=>{if(!S.tot)return;let ubah=false;
+    docs[S.k].forEach(e=>{if(e.saved||!e.txt)return;
+      const p=parseEsb(e.txt);e.parsed=p;e.cands=allCandidates(e.txt).slice(0,6);
+      if(p.total!=null){e.total=p.total;e.src='teks';e.manual=false;e.aiLabel=p.total_label||'';n++;ubah=true}
+      else if(e.total==null)gagal++;});
+    if(ubah||docs[S.k].length){renderDrop(S);recalcSlot(S,true)}});
+  toast(n?(n+' total terbaca dari teks dokumen'):(gagal?'Tidak ada total yang bisa dibaca dari teks — dokumen ini kemungkinan hasil scan/foto':'Tidak ada dokumen baru untuk dibaca'));
+};
 $('#btnAI').onclick=async()=>{
-  const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach(e=>{if(!e.saved&&e.pages&&S.tot)jobs.push([S,e])}));
+  const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach(e=>{if(!e.saved&&e.pages&&e.pages.length&&S.tot)jobs.push([S,e])}));
   if(!jobs.length)return toast('Tidak ada dokumen baru untuk dibaca AI');
-  $('#btnAI').disabled=true;
-  for(const [S,e] of jobs)await aiRead(S,e);
+  if(!sample)return toast('AI dimatikan di config.js (GEMINI_MODE: "off")');
+  aiOff=false;$('#btnAI').disabled=true;
+  for(const [S,e] of jobs){e.aiTried=true;await aiRead(S,e)}
+  try{const k='ai_count_'+jktDate();const n=(+localStorage.getItem(k)||0)+jobs.length;localStorage.setItem(k,n);$('#aiCount').textContent='AI dipakai '+n+'× hari ini (perangkat ini)'}catch(e){}
   $('#btnAI').disabled=false;
 };
+try{const k='ai_count_'+jktDate();const n=+localStorage.getItem(k)||0;if(n)document.addEventListener('DOMContentLoaded',()=>{$('#aiCount').textContent='AI dipakai '+n+'× hari ini (perangkat ini)'})}catch(e){}
 function resetCek(){parsedDates={};SLOTS.forEach(S=>{docs[S.k]=[];if(S.tot)$('#'+S.tot).value='';$('#'+S.ai).textContent='';renderDrop(S)});$('#cNote').value='';calcRes()}
 function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
   if(arr.length)docs[S.k]=arr.map(x=>({saved:true,name:x.name||S.label,no:x.no||null,total:x.total!=null?Number(x.total):null,asset:x.asset,pdf:!!x.pdf,at:x.at,by:x.by,npages:x.npages||1,src:x.src||null,aiLabel:x.label||null}));
@@ -520,7 +639,7 @@ function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
   renderDrop(S)})}
 
 /* ---------- settings ---------- */
-$('#btnSaveSet').onclick=async()=>{const {error}=await sb.from('settings').upsert({id:1,target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,updated:nowIso()});if(error)return toast('Gagal: '+error.message+' (hanya admin)');toast('Setting tersimpan');loadSettings()};
+$('#btnSaveSet').onclick=async()=>{const {error}=await sb.from('settings').upsert({id:1,target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,label_total:$('#sLabel').value.trim(),ai_auto:$('#sAiAuto').checked,updated:nowIso()});if(error)return toast('Gagal: '+error.message+' (hanya admin)');toast('Setting tersimpan');loadSettings()};
 
 /* ---------- panel admin: log kegagalan & versi pengguna ---------- */
 async function loadLog(){
