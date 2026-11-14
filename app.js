@@ -22,26 +22,126 @@ const saveLs=()=>{try{localStorage.setItem('po_ui',JSON.stringify(ls))}catch(e){
 
 /* ---------- state ---------- */
 /* ================= Supabase data layer ================= */
-const APP_VERSION='2026-11-14a';
+const APP_VERSION='2026-11-14e';
 const CFG=window.APP_CONFIG||{};
-if(!CFG.SUPABASE_URL||!CFG.SUPABASE_ANON_KEY){document.addEventListener('DOMContentLoaded',()=>{const m=document.getElementById('loginMsg');if(m)m.innerHTML='<b style="color:var(--bad)">config.js belum diisi.</b> Salin config.example.js → config.js dan isi SUPABASE_URL &amp; SUPABASE_ANON_KEY.'})}
-const sb=(window.supabase&&CFG.SUPABASE_URL)?window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_ANON_KEY):null;
+/* AUTH_MODE: 'supabase' (email+password) | 'access' (Cloudflare Access, tanpa form login)
+   STORAGE_BACKEND: 'supabase' (bucket dokumen) | 'r2' (Cloudflare R2 lewat Worker) */
+const AUTH_MODE=CFG.AUTH_MODE||'supabase';
+const STORE=CFG.STORAGE_BACKEND||(AUTH_MODE==='access'?'r2':'supabase');
+if(AUTH_MODE==='supabase'&&(!CFG.SUPABASE_URL||!CFG.SUPABASE_ANON_KEY)){document.addEventListener('DOMContentLoaded',()=>{const m=document.getElementById('loginMsg');if(m)m.innerHTML='<b style="color:var(--bad)">config.js belum diisi.</b> Salin config.example.js → config.js dan isi SUPABASE_URL &amp; SUPABASE_ANON_KEY.'})}
+/* Pustaka Supabase hanya dimuat kalau salah satu bagian masih memakai Supabase.
+   Setelah pindah penuh ke Cloudflare, halaman tidak memuat kode Supabase sama sekali. */
+const SB_JS=CFG.SUPABASE_JS||'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js';
+const needSb=()=>(AUTH_MODE==='supabase'||(CFG.DATA_BACKEND||'supabase')==='supabase'||STORE==='supabase');
+let sb=null;
+async function initSb(){
+  if(sb||!needSb())return sb;
+  if(!CFG.SUPABASE_URL)return null;
+  if(!window.supabase){try{await loadScript(SB_JS)}catch(e){console.warn(e)}}
+  if(window.supabase)sb=window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_ANON_KEY);
+  return sb;
+}
 const BUCKET=CFG.STORAGE_BUCKET||'dokumen';
 let db=null,userApi=null,assets=null,sample=null,downloads=true;
 const PO_COLS=['id','region','supplier','po_no','tgl','tgl_gudang','po_at','po_by','gr_no','gr_at','gr_by','inv_no','inv_at','inv_by','nominal','inv_dist','gr_return','keterangan','legacy','created','updated','po_nos','gr_nos','po_date','gr_date','inv_date','barang_terima','inv_terima_at','tunggu_inv','tunggu_inv_at','tunggu_inv_selesai','cek'];
 function toRow(id,d){const row={id};PO_COLS.forEach(c=>{if(c==='id')return;let v=d[c];if(v===undefined)v=null;if(v==='' && ['po_at','gr_at','inv_at','inv_terima_at','tunggu_inv_at','tunggu_inv_selesai','created','updated','po_date','gr_date','inv_date','barang_terima','tgl','tgl_gudang','nominal'].includes(c))v=null;row[c]=v});row.check_status=d.cek?d.cek.status:null;return row}
 function fromRow(r){const d={...r};['po_at','gr_at','inv_at','inv_terima_at','tunggu_inv_at','tunggu_inv_selesai','created','updated'].forEach(c=>{if(d[c])d[c]=new Date(d[c]).toISOString()});['gr_no','inv_no','gr_return','inv_dist','keterangan','supplier','tgl_gudang','barang_terima','po_no'].forEach(c=>{if(d[c]==null)d[c]=''});if(d.nominal!=null)d.nominal=Number(d.nominal);['po_nos','gr_nos'].forEach(c=>{if(!Array.isArray(d[c]))d[c]=d[c]?[].concat(d[c]):[]});return d}
-async function sbSave(id,d){const {error}=await sb.from('po').upsert(toRow(id,d));if(error)throw error}
-async function sbDelete(id){const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error}
-async function loadPos(){const {data,error}=await sb.from('po').select('*').order('created',{ascending:false}).limit(5000);if(error){toast('Gagal memuat PO: '+error.message);logFail('muat',error.message);return}POS=data.map(fromRow);render()}
-async function loadSettings(){const {data}=await sb.from('settings').select('*').eq('id',1).maybeSingle();if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi),label_total:data.label_total||'',ai_auto:data.ai_auto!==false};$('#sLabel').value=SET.label_total;$('#sAiAuto').checked=SET.ai_auto}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
-async function loadProfiles(){const {data}=await sb.from('profiles').select('id,display_name,email,role');(data||[]).forEach(p=>{names[p.id]=p.display_name||(p.email||'').split('@')[0]||'Petugas';if(p.id===uid)isAdmin=p.role==='admin'})}
-const urlCache={};
-function burl(id){if(!id)return '';if(id in urlCache)return urlCache[id];urlCache[id]='';sb.storage.from(BUCKET).createSignedUrl(id,3600).then(r=>{urlCache[id]=(r.data&&r.data.signedUrl)||'';render();if($('#mbg').classList.contains('open')&&editing)refreshModalThumbs()}).catch(()=>{});return ''}
+/* ===== Lapisan data: 'supabase' (asal) atau 'd1' (Cloudflare) =====
+   Ganti DATA_BACKEND di config.js untuk berpindah; login tetap Supabase Auth. */
+const BACKEND=(CFG.DATA_BACKEND||'supabase');
+const API=(CFG.API_URL||'').replace(/\/+$/,'');
+/* Di mode Access, browser mengirim cookie Access otomatis → tidak perlu header Authorization.
+   Di mode Supabase, token login dilampirkan seperti sebelumnya. */
+async function authHeaders(){
+  if(AUTH_MODE==='access')return {};
+  if(!sb)throw new Error('Supabase belum siap');
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session)throw new Error('sesi login habis — keluar lalu masuk lagi');
+  return {Authorization:'Bearer '+session.access_token};
+}
+async function apiFetch(path,opt){
+  if(!API)throw new Error('API_URL belum diisi di config.js');
+  const res=await fetch(API+path,{credentials:'include',...(opt||{}),headers:{'Content-Type':'application/json',...(await authHeaders()),...((opt||{}).headers||{})}});
+  let j=null;try{j=await res.json()}catch(e){}
+  if(!res.ok)throw new Error((j&&j.error)||('API '+res.status));
+  return j||{};
+}
+const DATA={
+  async listPo(){ if(BACKEND==='d1'){const j=await apiFetch('/po?limit=5000');return {data:j.data||[],error:null}}
+    return await sb.from('po').select('*').order('created',{ascending:false}).limit(5000); },
+  async savePo(id,d){ if(BACKEND==='d1'){await apiFetch('/po',{method:'POST',body:JSON.stringify({row:toRow(id,d)})});return}
+    const {error}=await sb.from('po').upsert(toRow(id,d));if(error)throw error; },
+  async deletePo(id){ if(BACKEND==='d1'){await apiFetch('/po/delete',{method:'POST',body:JSON.stringify({id})});return}
+    const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error; },
+  async getSettings(){ if(BACKEND==='d1'){const j=await apiFetch('/settings');return {data:j.data}}
+    return await sb.from('settings').select('*').eq('id',1).maybeSingle(); },
+  async saveSettings(row){ if(BACKEND==='d1'){await apiFetch('/settings',{method:'POST',body:JSON.stringify({row})});return {error:null}}
+    return await sb.from('settings').upsert({id:1,...row}); },
+  async listProfiles(){ if(BACKEND==='d1'){const j=await apiFetch('/profiles');return {data:j.data||[]}}
+    return await sb.from('profiles').select('id,email,display_name,role,app_version,last_seen'); },
+  async updateProfile(row){ if(BACKEND==='d1'){await apiFetch('/profile',{method:'POST',body:JSON.stringify({row})});return {error:null}}
+    return await sb.from('profiles').update(row).eq('id',uid); },
+  async insertLog(row){ if(BACKEND==='d1'){await apiFetch('/log',{method:'POST',body:JSON.stringify({row})});return}
+    await sb.from('app_log').insert(row); },
+  async listLog(kind){ if(BACKEND==='d1'){const j=await apiFetch('/log'+(kind?'?kind='+encodeURIComponent(kind):''));return {data:j.data||[]}}
+    let q=sb.from('app_log').select('*').order('at',{ascending:false}).limit(200);if(kind)q=q.eq('kind',kind);return await q; },
+  async cleanLog(){ if(BACKEND==='d1'){await apiFetch('/log/clean',{method:'POST',body:'{}'});return {error:null}}
+    return await sb.from('app_log').delete().lt('at',new Date(Date.now()-30*864e5).toISOString()); },
+};
+async function sbSave(id,d){await DATA.savePo(id,d)}
+async function sbDelete(id){await DATA.deletePo(id)}
+let muatGagal=0;
+async function loadPos(percobaan){
+  const n=percobaan||0;
+  let res;
+  try{res=await DATA.listPo()}
+  catch(e){res={error:{message:e.message||'Failed to fetch'}}}
+  const {data,error}=res;
+  if(error){
+    const jaringan=/Failed to fetch|NetworkError|Load failed|network/i.test(error.message||'');
+    if(jaringan&&n<3){$('#who').textContent='Koneksi terputus — mencoba lagi ('+(n+1)+'/3)…';
+      setTimeout(()=>loadPos(n+1),1200*(n+1));return}
+    muatGagal++;
+    if(muatGagal<=2)logFail('muat',error.message);   // jangan banjiri log
+    toast(jaringan?'Koneksi internet terputus — data belum termuat, coba muat ulang halaman':('Gagal memuat PO: '+error.message));
+    $('#who').textContent=jaringan?'⚠ Koneksi terputus':'⚠ Gagal memuat data';
+    return;
+  }
+  muatGagal=0;if(uid&&names[uid])$('#who').textContent='👤 '+names[uid]+(isAdmin?' · Admin':'');
+  POS=data.map(fromRow);render();
+}
+window.addEventListener('online',()=>{toast('Koneksi kembali — memuat ulang data');loadPos()});
+async function loadSettings(){let data=null;try{data=(await DATA.getSettings()).data}catch(e){console.warn(e)}if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi),label_total:data.label_total||'',ai_auto:data.ai_auto!==false};$('#sLabel').value=SET.label_total;$('#sAiAuto').checked=SET.ai_auto}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
+async function loadProfiles(){let data=null;try{data=(await DATA.listProfiles()).data}catch(e){console.warn(e)}(data||[]).forEach(p=>{names[p.id]=p.display_name||(p.email||'').split('@')[0]||'Petugas';if(p.id===uid)isAdmin=p.role==='admin'})}
+const urlCache={};const urlAntri=new Set();let urlTimer=null;
+function burl(id){if(!id)return '';
+  // R2 + Access: URL langsung — cookie Access yang menjaganya, tanpa tanda tangan.
+  // R2 + login Supabase: tautan harus ditandatangani dulu (lewat flushUrls),
+  // karena <img src> tidak bisa mengirim header token.
+  if(STORE==='r2'&&AUTH_MODE==='access')return API+'/file/'+id.split('/').map(encodeURIComponent).join('/');
+  if(id in urlCache)return urlCache[id];
+  urlAntri.add(id);if(!urlTimer)urlTimer=setTimeout(flushUrls,80);return ''}
+async function flushUrls(){
+  urlTimer=null;const paths=[...urlAntri];urlAntri.clear();if(!paths.length)return;
+  for(let i=0;i<paths.length;i+=80){
+    const batch=paths.slice(i,i+80);
+    try{
+      if(STORE==='r2'){
+        const j=await apiFetch('/file/urls',{method:'POST',body:JSON.stringify({paths:batch})});
+        const m=j.data||{};batch.forEach(p=>urlCache[p]=m[p]||'');
+      }else{
+        const {data}=await sb.storage.from(BUCKET).createSignedUrls(batch,3600);
+        (data||[]).forEach(d=>{if(d&&d.path)urlCache[d.path]=d.signedUrl||''});
+        batch.forEach(p=>{if(!(p in urlCache))urlCache[p]=''});
+      }
+    }catch(e){batch.forEach(p=>urlCache[p]='')}
+  }
+  render();if($('#mbg').classList.contains('open')&&editing)refreshModalThumbs();
+}
 function refreshModalThumbs(){document.querySelectorAll('[data-burl]').forEach(el=>{const u=burl(el.dataset.burl);if(u){if(el.tagName==='IMG')el.src=u;else el.href=u}})}
 const MAXB=20*1024*1024;
 const uaShort=()=>{const u=navigator.userAgent;const dev=/iPhone|iPad/.test(u)?'iOS':/Android/.test(u)?'Android':/Mac/.test(u)?'Mac':/Windows/.test(u)?'Win':'?';const br=(u.match(/(Chrome|CriOS|Firefox|Edg|Safari)\/[\d.]+/)||['?'])[0];return dev+' '+br};
-async function logFail(kind,message,extra){try{if(!sb||!uid)return;await sb.from('app_log').insert({user_id:uid,email:(names[uid]||''),kind,message:String(message||'').slice(0,400),app_version:APP_VERSION,ua:uaShort(),...(extra||{})})}catch(e){}}
+async function logFail(kind,message,extra){try{if(!uid)return;await DATA.insertLog({user_id:uid,email:(names[uid]||''),kind,message:String(message||'').slice(0,400),app_version:APP_VERSION,ua:uaShort(),...(extra||{})})}catch(e){}}
 function uploadErrMsg(error){const m=((error&&error.message)||'')+' '+((error&&(error.statusCode||error.status))||'');
   if(/exceeded the maximum allowed size|Payload too large|413/i.test(m))return 'file melebihi batas 20 MB di server';
   if(/row-level security|Unauthorized|not authorized|403/i.test(m))return 'tidak punya izin upload (policy storage) — jalankan ulang schema.sql';
@@ -53,13 +153,24 @@ function uploadErrMsg(error){const m=((error&&error.message)||'')+' '+((error&&(
 async function uploadDoc(blob,kind,ext){
   if(!blob)throw new Error('file kosong');
   if(blob.size>MAXB)throw new Error('ukuran '+(blob.size/1048576).toFixed(1)+' MB melebihi batas 20 MB');
-  let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
-  if(!sess)throw new Error('sesi login habis — keluar lalu masuk lagi');
+  if(AUTH_MODE!=='access'){
+    let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
+    if(!sess)throw new Error('sesi login habis — keluar lalu masuk lagi');
+  }
   const base=`${jktDate()}/${(editing&&editing.id)||'new'}_${kind}_${Date.now()}`;
   let last=null;
   for(let att=0;att<2;att++){
     const path=base+(att?'_r'+att:'')+'.'+ext;
-    const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:blob.type||(ext==='pdf'?'application/pdf':'image/jpeg'),upsert:false});
+    const type=blob.type||(ext==='pdf'?'application/pdf':'image/jpeg');
+    let error=null;
+    if(STORE==='r2'){
+      try{
+        const res=await fetch(API+'/file?path='+encodeURIComponent(path),{method:'POST',credentials:'include',headers:{'X-File-Type':type,...(await authHeaders())},body:blob});
+        if(!res.ok){const j=await res.json().catch(()=>null);error={message:(j&&j.error)||('R2 '+res.status),statusCode:res.status}}
+      }catch(e){error={message:e.message||'gagal upload'}}
+    }else{
+      error=(await sb.storage.from(BUCKET).upload(path,blob,{contentType:type,upsert:false})).error;
+    }
     if(!error)return path;
     last=error;const msg=uploadErrMsg(error);
     if(!/koneksi internet terputus|gagal upload/.test(msg))throw new Error(msg);
@@ -70,15 +181,40 @@ async function uploadDoc(blob,kind,ext){
 const blobToB64=b=>new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result).split(',')[1]);fr.onerror=rej;fr.readAsDataURL(b)});
 async function geminiJson(prompt,blobs){
   const images=await Promise.all(blobs.map(async b=>({mime:b.type||'image/jpeg',data:await blobToB64(b)})));
-  if((CFG.GEMINI_MODE||'edge')==='edge'){
+  const mode=CFG.GEMINI_MODE||'edge';
+  /* Batas waktu. Tanpa ini petugas bisa menunggu 2-3 menit sebelum error:
+     Supabase Edge Function baru dihentikan sendiri di sekitar 150 detik
+     (WORKER_RESOURCE_LIMIT / status 546). Lebih baik berhenti lebih awal
+     dan langsung menyarankan tombol "Baca tanpa AI". */
+  const BATAS=(Number(CFG.AI_TIMEOUT_S)||45)*1000;
+  const ac=new AbortController();
+  const jam=setTimeout(()=>ac.abort(),BATAS);
+  const habis=()=>{const e=new Error('AI tidak menjawab dalam '+Math.round(BATAS/1000)+' detik');e.code='TIMEOUT';return e};
+  if(mode==='worker'){
+    if(!CFG.GEMINI_URL)throw new Error('GEMINI_URL belum diisi di config.js');
+    let res;
+    try{res=await fetch(CFG.GEMINI_URL,{method:'POST',credentials:'include',signal:ac.signal,headers:{'Content-Type':'application/json',...(await authHeaders())},body:JSON.stringify({prompt,images,model:CFG.GEMINI_MODEL})})}
+    catch(e){throw (e.name==='AbortError')?habis():e}
+    finally{clearTimeout(jam)}
+    const out=await res.json().catch(()=>null);
+    if(!res.ok)throw new Error('worker '+res.status+': '+((out&&out.error)||'').slice(0,200));
+    return out;
+  }
+  if(mode==='edge'){
     const {data:{session}}=await sb.auth.getSession();
-    const res=await fetch(`${CFG.SUPABASE_URL}/functions/v1/gemini-total`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(session?session.access_token:CFG.SUPABASE_ANON_KEY),'apikey':CFG.SUPABASE_ANON_KEY},body:JSON.stringify({prompt,images,model:CFG.GEMINI_MODEL})});
+    let res;
+    try{res=await fetch(`${CFG.SUPABASE_URL}/functions/v1/gemini-total`,{method:'POST',signal:ac.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+(session?session.access_token:CFG.SUPABASE_ANON_KEY),'apikey':CFG.SUPABASE_ANON_KEY},body:JSON.stringify({prompt,images,model:CFG.GEMINI_MODEL})})}
+    catch(e){throw (e.name==='AbortError')?habis():e}
+    finally{clearTimeout(jam)}
     if(!res.ok)throw new Error('edge function '+res.status+': '+(await res.text()).slice(0,200));return await res.json();
   }
   if(!CFG.GEMINI_API_KEY)throw new Error('GEMINI_API_KEY belum diisi di config.js');
   const model=CFG.GEMINI_MODEL||'gemini-2.5-flash';
   const body={contents:[{role:'user',parts:[{text:prompt},...images.map(i=>({inline_data:{mime_type:i.mime,data:i.data}}))]}],generationConfig:{response_mime_type:'application/json',temperature:0}};
-  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(CFG.GEMINI_API_KEY)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let res;
+  try{res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(CFG.GEMINI_API_KEY)}`,{method:'POST',signal:ac.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+  catch(e){throw (e.name==='AbortError')?habis():e}
+  finally{clearTimeout(jam)}
   if(!res.ok)throw new Error('Gemini '+res.status+': '+(await res.text()).slice(0,200));
   const j=await res.json();const txt=(((j.candidates||[])[0]||{}).content||{}).parts?.map(p=>p.text).join('')||'';
   try{return JSON.parse(txt)}catch(e){const m=txt.match(/\{[\s\S]*\}/);return m?JSON.parse(m[0]):null}
@@ -88,36 +224,61 @@ let aiOff=false;   // true bila kuota Gemini habis → berhenti memanggil AI sam
 let uid=null,canWrite=true,isAdmin=false;
 let POS=[],SET={target_gr_h:24,target_inv_h:48,toleransi:0,label_total:'',ai_auto:true};
 const names={};
-async function resolveNames(ids){const need=[...new Set(ids.filter(i=>i&&!(i in names)))];if(!need.length||!sb)return;await loadProfiles();need.forEach(i=>{if(!(i in names))names[i]=''})}
+async function resolveNames(ids){const need=[...new Set(ids.filter(i=>i&&!(i in names)))];if(!need.length)return;await loadProfiles();need.forEach(i=>{if(!(i in names))names[i]=''})}
 const nm=id=>id?(names[id]||'Petugas'):'-';
 
 /* ---------- nav ---------- */
 guard('nav',()=>{document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));});
 function show(v){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.v===v));document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='v-'+v));ls.view=v;saveLs();render()}
 guard('regions',()=>{['#dRegion','#oRegion','#pRegion','#mRegion'].forEach(s=>{const el=$(s);REGIONS.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;el.appendChild(o)})});});
-guard('filters',()=>{['#dPeriode','#dRegion','#oRegion','#oSort','#pRegion','#pStatus','#pDari','#pSampai'].forEach(s=>$(s).addEventListener('change',render));$('#pCari').addEventListener('input',render);});
+guard('filters',()=>{['#dPeriode','#dRegion','#oRegion','#oSort','#pRegion','#pStatus','#pDari','#pSampai'].forEach(s=>$(s).addEventListener('change',()=>{poShown=150;render()}));$('#pCari').addEventListener('input',()=>{poShown=150;render()});});
 
 /* ---------- boot: auth + data ---------- */
 let rtChannel=null;
-async function afterLogin(session){
-  uid=session.user.id;$('#loginBg').classList.remove('open');$('#btnLogout').style.display='';
-  await loadProfiles();if(!names[uid]){await sb.from('profiles').upsert({id:uid,email:session.user.email});await loadProfiles()}
-  $('#who').textContent='👤 '+(names[uid]||session.user.email)+(isAdmin?' · Admin':'');$('#myName').value=names[uid]||'';$('#myRole').textContent=isAdmin?'Peran: admin (bisa ubah setting & hapus PO)':'Peran: staf';
-  try{await sb.from('profiles').update({last_seen:new Date().toISOString(),app_version:APP_VERSION,ua:uaShort()}).eq('id',uid)}catch(e){}
+async function afterLogin(U){
+  uid=U.id;$('#loginBg').classList.remove('open');$('#btnLogout').style.display='';
+  await loadProfiles();
+  if(!names[uid]){try{if(BACKEND==='supabase')await sb.from('profiles').upsert({id:uid,email:U.email});else await DATA.updateProfile({display_name:(U.email||'').split('@')[0]})}catch(e){console.warn(e)};await loadProfiles()}
+  $('#who').textContent='👤 '+(names[uid]||U.email)+(isAdmin?' · Admin':'');$('#myName').value=names[uid]||'';$('#myRole').textContent=isAdmin?'Peran: admin (bisa ubah setting & hapus PO)':'Peran: staf';
+  try{await DATA.updateProfile({last_seen:new Date().toISOString(),app_version:APP_VERSION,ua:uaShort()})}catch(e){console.warn(e)}
   if(isAdmin){$('#cardLog').style.display='';$('#cardUsers').style.display='';loadUsers()}
   await loadSettings();await loadPos();
-  if(rtChannel)sb.removeChannel(rtChannel);
-  rtChannel=sb.channel('po-live').on('postgres_changes',{event:'*',schema:'public',table:'po'},()=>{clearTimeout(window._rt);window._rt=setTimeout(loadPos,400)}).on('postgres_changes',{event:'*',schema:'public',table:'settings'},loadSettings).subscribe();
+  if(BACKEND==='supabase'){
+    if(rtChannel)sb.removeChannel(rtChannel);
+    rtChannel=sb.channel('po-live').on('postgres_changes',{event:'*',schema:'public',table:'po'},()=>{clearTimeout(window._rt);window._rt=setTimeout(loadPos,400)}).on('postgres_changes',{event:'*',schema:'public',table:'settings'},loadSettings).subscribe();
+  }else{
+    if(window._poll)clearInterval(window._poll);
+    window._poll=setInterval(()=>{if(!document.hidden&&!$('#mbg').classList.contains('open'))loadPos()},30000);
+    window.addEventListener('focus',()=>{if(!$('#mbg').classList.contains('open'))loadPos()});
+  }
 }
 function showLogin(msg){$('#loginBg').classList.add('open');$('#btnLogout').style.display='none';$('#who').textContent='Belum login';if(msg)$('#loginMsg').textContent=msg}
 (async()=>{
-  if(!sb){showLogin();return}
+  if(AUTH_MODE==='access'){
+    // Cloudflare Access sudah memeriksa identitas sebelum halaman terbuka.
+    $('#loginBg').classList.remove('open');
+    $('#btnLogout').onclick=()=>{location.href='/cdn-cgi/access/logout'};
+    try{
+      const me=(await apiFetch('/me')).data;
+      if(me&&me.role)isAdmin=me.role==='admin';
+      await afterLogin({id:me.id,email:me.email});
+    }catch(e){
+      $('#who').textContent='Gagal membaca identitas';
+      toast('Gagal memuat: '+(e.message||e));
+    }
+    $('#btnSaveName').onclick=async()=>{const n=$('#myName').value.trim();if(!n)return;try{const r=await DATA.updateProfile({display_name:n});if(r&&r.error)throw r.error}catch(e){return toast('Gagal: '+(e.message||e))}names[uid]=n;$('#who').textContent='👤 '+n+(isAdmin?' · Admin':'');toast('Nama tersimpan');render()};
+    $('#mTunggu').addEventListener('change',()=>{if($('#mTunggu').checked&&!$('#mTerima').value)$('#mTerima').value=jktDate()});
+    return;
+  }
+  await initSb();
+  if(!sb){showLogin('Supabase tidak termuat — periksa config.js atau koneksi.');return}
   $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();$('#btnLogin').disabled=true;$('#loginMsg').textContent='Memeriksa…';const {error}=await sb.auth.signInWithPassword({email:$('#lEmail').value.trim(),password:$('#lPass').value});$('#btnLogin').disabled=false;$('#loginMsg').textContent=error?('Gagal: '+error.message):''});
   if(CFG.ALLOW_SIGNUP){const b=document.createElement('button');b.type='button';b.className='btn';b.textContent='Daftar akun baru';b.onclick=async()=>{const {error}=await sb.auth.signUp({email:$('#lEmail').value.trim(),password:$('#lPass').value});$('#loginMsg').textContent=error?('Gagal: '+error.message):'Akun dibuat — cek email untuk konfirmasi (jika diaktifkan), lalu masuk.'};$('#loginForm').appendChild(b)}
   $('#btnLogout').onclick=async()=>{await sb.auth.signOut();location.reload()};
-  sb.auth.onAuthStateChange((ev,session)=>{if(session&&ev!=='TOKEN_REFRESHED'&&ev!=='USER_UPDATED'){afterLogin(session).catch(e=>toast('Gagal memuat: '+e.message))}else if(!session)showLogin()});
-  const {data:{session}}=await sb.auth.getSession();if(session)afterLogin(session).catch(e=>toast('Gagal memuat: '+e.message));else showLogin();
-  $('#btnSaveName').onclick=async()=>{const n=$('#myName').value.trim();if(!n)return;const {error}=await sb.from('profiles').update({display_name:n}).eq('id',uid);if(error)return toast('Gagal: '+error.message);names[uid]=n;$('#who').textContent='👤 '+n+(isAdmin?' · Admin':'');toast('Nama tersimpan');render()};
+  const U=s=>({id:s.user.id,email:s.user.email});
+  sb.auth.onAuthStateChange((ev,session)=>{if(session&&ev!=='TOKEN_REFRESHED'&&ev!=='USER_UPDATED'){afterLogin(U(session)).catch(e=>toast('Gagal memuat: '+e.message))}else if(!session)showLogin()});
+  const {data:{session}}=await sb.auth.getSession();if(session)afterLogin(U(session)).catch(e=>toast('Gagal memuat: '+e.message));else showLogin();
+  $('#btnSaveName').onclick=async()=>{const n=$('#myName').value.trim();if(!n)return;try{const r=await DATA.updateProfile({display_name:n});if(r&&r.error)throw r.error}catch(e){return toast('Gagal: '+(e.message||e))}names[uid]=n;$('#who').textContent='👤 '+n+(isAdmin?' · Admin':'');toast('Nama tersimpan');render()};
   $('#mTunggu').addEventListener('change',()=>{if($('#mTunggu').checked&&!$('#mTerima').value)$('#mTerima').value=jktDate()});
 
 })();
@@ -197,12 +358,16 @@ function filteredPo(){
   const stOk=p=>!st||(st==='tunggu'?isTunggu(p):st==='selisih'?p.cek&&p.cek.status==='SELISIH':st==='match'?p.cek&&p.cek.status==='MATCH':st==='belumcek'?!cekDone(p.cek):(status(p)===st&&(st==='done'||!isTunggu(p))));
   return POS.filter(p=>(!reg||p.region===reg)&&stOk(p)&&(!q||[p.po_no,p.gr_no,p.inv_no,p.supplier,p.inv_dist,p.keterangan,(p.po_nos||[]).join(' '),(p.gr_nos||[]).join(' ')].join(' ').toLowerCase().includes(q))&&(!d1||(p.tgl||'')>=d1)&&(!d2||(p.tgl||'')<=d2));
 }
+let poShown=150;
 function renderPo(){
-  const list=filteredPo();$('#pInfo').textContent=list.length+' PO ditampilkan dari '+POS.length;
+  const all=filteredPo();const list=all.slice(0,poShown);
+  $('#pInfo').innerHTML=list.length+' dari '+all.length+' PO ditampilkan (total '+POS.length+' baris)'+
+    (all.length>list.length?' · <button class="btn sm" id="btnMore">Tampilkan 150 berikutnya</button>':'');
   const cell=(no,at,by,legacy,noLbl,extra)=>no?`<span class="mono">${esc(no)}</span>${(extra||[]).map(x=>'<br><span class="mono">'+esc(x)+'</span>').join('')}${(extra||[]).length?'<div class="sub">'+((extra.length+1))+' dokumen</div>':''}<div class="sub">${at?'⏱ '+jkt(at)+' · '+esc(nm(by)):(legacy?'import, tanpa jam':'')}</div>`:'<span class="b '+(noLbl?'blue':'mut')+'">'+(noLbl||'—')+'</span>';
   const extras=(p,f)=>((p[f]||[]).slice(1));
   $('#tPo').innerHTML='<tr><th>Tgl</th><th>Region</th><th>Supplier</th><th>No PO</th><th>No GR</th><th>PO→GR</th><th>No Invoice</th><th>GR→Inv</th><th>Nominal</th><th>Dokumen &amp; cek total</th><th>Ket</th><th></th></tr>'+
   (list.length?list.map(p=>`<tr><td>${fmtTgl(p.tgl)}</td><td><span class="b mut">${p.region}</span></td><td>${esc(p.supplier)}</td><td>${cell(p.po_no,p.po_at,p.po_by,p.legacy,p.po_no?'':'PO belum dibuat',extras(p,'po_nos'))}${p.po_date?'<div class="sub">tgl dok. '+fmtTgl(p.po_date)+'</div>':''}</td><td>${cell(p.gr_no,p.gr_at,p.gr_by,p.legacy,'',extras(p,'gr_nos'))}${p.gr_date?'<div class="sub">tgl dok. '+fmtTgl(p.gr_date)+'</div>':''}</td><td>${fmtH(hours(p.po_at,p.gr_at))}</td><td>${cell(p.inv_no,p.inv_at,p.inv_by,p.legacy)}${p.inv_date?'<div class="sub">tgl dok. '+fmtTgl(p.inv_date)+'</div>':''}${p.inv_dist?'<div class="sub">Dist: '+esc(p.inv_dist)+'</div>':''}</td><td>${fmtH(hours(invStart(p),p.inv_at))}${p.inv_terima_at&&p.inv_at?'<div class="sub">sejak inv. distributor '+fmtTgl(p.inv_terima_at.slice(0,10))+'</div>':''}</td><td>${fmtRp(p.nominal)}</td><td>${cekBadge(p)}</td><td class="sub">${isTunggu(p)?'<span class="b blue">📦 menunggu inv. distributor</span><br>':''}${esc(p.keterangan||'')}${p.gr_return?'<br>Ret: '+esc(p.gr_return):''}</td><td style="white-space:nowrap">${status(p)==='nogr'?`<button class="btn sm p" data-edit="${p.id}" data-focus="mGr">Isi GR</button>`:status(p)==='noinv'?`<button class="btn sm p" data-edit="${p.id}" data-focus="mInv">Isi Inv</button>`:''} <button class="btn sm" data-edit="${p.id}">Edit</button></td></tr>`).join(''):'<tr><td colspan="12" class="empty">Belum ada data. Klik <b>+ PO Baru</b> atau import dari Excel.</td></tr>');
+  const bm=$('#btnMore');if(bm)bm.onclick=()=>{poShown+=150;renderPo()};
   const sups=[...new Set(POS.map(p=>p.supplier).filter(Boolean))].sort();$('#supList').innerHTML=sups.map(s=>`<option value="${esc(s)}">`).join('');
 }
 document.body.addEventListener('click',e=>{const b=e.target.closest('[data-edit]');if(b){openModal(POS.find(p=>p.id===b.dataset.edit),b.dataset.focus)}});
@@ -358,6 +523,20 @@ document.addEventListener('click',e=>{const p=e.target.closest('[data-pick]');
     ent.total=c.v;ent.src='teks';ent.manual=true;ent.aiLabel=c.label;renderDrop(S);recalcSlot(S,true);toast('Total diambil dari: '+c.label);return}
   const b=e.target.closest('[data-del]');if(!b)return;e.stopPropagation();const [k,i]=b.dataset.del.split(':');docs[k].splice(+i,1);const S=slotOf(k);renderDrop(S);recalcSlot(S,true)});
 
+const LIB=(CFG.LIB_BASE||'https://cdnjs.cloudflare.com/ajax/libs/');
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('gagal memuat '+src));document.head.appendChild(s)})}
+let pdfSiap=null;
+async function ensurePdfJs(){
+  if(window.pdfjsLib)return true;
+  if(pdfSiap)return pdfSiap;
+  pdfSiap=(async()=>{try{
+    await loadScript(LIB+'pdf.js/2.16.105/pdf.min.js');
+    try{pdfjsLib.GlobalWorkerOptions.workerSrc=LIB+'pdf.js/2.16.105/pdf.worker.min.js'}catch(e){}
+    return true;
+  }catch(e){console.warn(e);return false}})();
+  return pdfSiap;
+}
+async function loadXlsx(){if(window.XLSX)return;await loadScript(LIB+'xlsx/0.18.5/xlsx.full.min.js')}
 const MAX_PAGES=8;
 async function takeFiles(fileList,S){
   const d=$('#'+S.drop);const files=[...fileList];
@@ -368,7 +547,7 @@ async function takeFiles(fileList,S){
     let r={pages:[],total:1,why:'tidak terbaca'};
     try{r=await toImages(file)}catch(e){r={pages:[],total:1,why:e.message||'tidak terbaca'}}
     const entry={saved:false,name:file.name,file,pages:r.pages,noPreview:!r.pages.length,why:r.why||'',isPdf:file.type==='application/pdf'||/\.pdf$/i.test(file.name),size:file.size,npages:r.total,no:null,total:null,parsed:null};
-    if(entry.isPdf&&window.pdfjsLib){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt;entry.cands=allCandidates(txt).slice(0,6);entry.txtOk=!!(entry.parsed&&entry.parsed.total!=null)}catch(err){console.warn('parse',err);logFail('muat','gagal baca teks PDF: '+(err.message||''),{file_name:(file.name||'').slice(0,120)})}}
+    if(entry.isPdf&&(window.pdfjsLib||await ensurePdfJs())){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt;entry.cands=allCandidates(txt).slice(0,6);entry.txtOk=!!(entry.parsed&&entry.parsed.total!=null)}catch(err){console.warn('parse',err);logFail('muat','gagal baca teks PDF: '+(err.message||''),{file_name:(file.name||'').slice(0,120)})}}
     docs[S.k].push(entry);
   }
   renderDrop(S);recalcSlot(S);
@@ -440,11 +619,29 @@ function recalcSlot(S,silent){
   calcRes();
 }
 
+const AI_MAX_PAGES=3, AI_MAX_PX=1400, AI_Q=0.82;
+async function shrinkForAI(blob){
+  try{
+    const bmp=await createImageBitmap(blob);
+    const sc=Math.min(1,AI_MAX_PX/Math.max(bmp.width,bmp.height));
+    if(sc>=1&&blob.size<700*1024)return blob;
+    const c=document.createElement('canvas');c.width=Math.round(bmp.width*sc);c.height=Math.round(bmp.height*sc);
+    c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);
+    const out=await new Promise(r=>c.toBlob(r,'image/jpeg',AI_Q));
+    return (out&&out.size<blob.size)?out:blob;
+  }catch(e){return blob}
+}
+async function pagesForAI(pages){
+  const take=pages.slice(0,AI_MAX_PAGES);
+  const out=[];for(const p of take)out.push(await shrinkForAI(p));
+  return out;
+}
 async function canvasToJpeg(src){const bmp={width:src.naturalWidth||src.width,height:src.naturalHeight||src.height};const max=2000,sc=Math.min(1,max/Math.max(bmp.width,bmp.height));const c=document.createElement('canvas');c.width=Math.round(bmp.width*sc);c.height=Math.round(bmp.height*sc);c.getContext('2d').drawImage(src,0,0,c.width,c.height);return await new Promise(r=>c.toBlob(r,'image/jpeg',0.9))}
 async function toImages(file){
   const isPdf=file.type==='application/pdf'||/\.pdf$/i.test(file.name);
   if(isPdf){
-    if(!window.pdfjsLib)return {pages:[],total:1,why:'pdf.js tidak termuat (jaringan memblokir cdnjs?)'};
+    if(!window.pdfjsLib)await ensurePdfJs();
+    if(!window.pdfjsLib)return {pages:[],total:1,why:'pustaka pembaca PDF gagal dimuat (jaringan memblokir CDN?)'};
     try{
       const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;const pages=[];
       for(let i=1;i<=Math.min(pdf.numPages,MAX_PAGES);i++){const page=await pdf.getPage(i);const vp=page.getViewport({scale:2});const c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;pages.push(await canvasToJpeg(c))}
@@ -590,7 +787,8 @@ async function aiRead(S,e){
   e.reading=true;renderDrop(S);
   const prompt=S.k==='fisik'?AI_PROMPT_FISIK:AI_PROMPT_ESB.replace('${desc}',S.desc);
   try{
-    const r=await sample.json(prompt,e.pages);
+    const imgs=await pagesForAI(e.pages);
+    const r=await sample.json(prompt,imgs);
     e.reading=false;
     if(r&&r.total!=null&&!isNaN(Number(r.total))){
       e.total=Number(r.total);e.src='AI';e.manual=true;e.aiLabel=r.label||'';e.conf=r.confidence||'';
@@ -606,10 +804,29 @@ async function aiRead(S,e){
     return false;
   }catch(err){e.reading=false;const msg=String(err.message||err.code||'');
     const kuota=/429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg);
+    const berat=/WORKER_RESOURCE_LIMIT|546|compute resources/i.test(msg);
+    const lambat=err.code==='TIMEOUT'||/AbortError|tidak menjawab dalam/i.test(msg);
     if(kuota)aiOff=true;
     renderDrop(S);
     logFail('ai',kuota?('kuota Gemini habis (429)'):msg,{file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null});
     if(kuota){$('#'+S.ai).innerHTML='<span class="warnx">Kuota Gemini habis hari ini — isi total manual. (Dokumen PDF yang ada teksnya tetap terbaca otomatis tanpa AI.)</span>';return false}
+    if(berat||lambat){
+      // Sebelum menyerah: kalau dokumennya punya teks, baca pakai logika saja.
+      if(e.txt){
+        const p=parseEsb(e.txt);
+        if(p.total!=null){
+          e.parsed=p;e.total=p.total;e.src='teks';e.manual=false;e.aiLabel=p.total_label||'';
+          e.cands=allCandidates(e.txt).slice(0,6);
+          renderDrop(S);recalcSlot(S,true);
+          $('#'+S.ai).innerHTML='✓ Dibaca tanpa AI: <b>'+fmtRp(e.total)+'</b>'+(p.total_label?' <span class="sub">('+esc(p.total_label)+')</span>':'')+' <span class="sub">· AI '+(lambat?'terlalu lama':'kehabisan sumber daya')+', jadi dipakai pembacaan teks</span>';
+          return true;
+        }
+      }
+      $('#'+S.ai).innerHTML='<span class="warnx">'+(lambat
+        ? 'AI terlalu lama menjawab dan dihentikan. Tekan <b>Baca tanpa AI</b>, atau pilih/ketik angka totalnya.'
+        : 'Server pembaca AI kehabisan sumber daya (dokumen terlalu berat). Coba foto ulang lebih kecil, atau pilih/ketik angkanya.')+'</span>';
+      return false;
+    }
     $('#'+S.ai).innerHTML='<span class="warnx">AI gagal ('+esc(err.code||err.message||'')+') — isi total manual</span>';return false}
 }
 $('#btnText').onclick=()=>{
@@ -639,13 +856,12 @@ function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
   renderDrop(S)})}
 
 /* ---------- settings ---------- */
-$('#btnSaveSet').onclick=async()=>{const {error}=await sb.from('settings').upsert({id:1,target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,label_total:$('#sLabel').value.trim(),ai_auto:$('#sAiAuto').checked,updated:nowIso()});if(error)return toast('Gagal: '+error.message+' (hanya admin)');toast('Setting tersimpan');loadSettings()};
+$('#btnSaveSet').onclick=async()=>{try{const r=await DATA.saveSettings({target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,label_total:$('#sLabel').value.trim(),ai_auto:$('#sAiAuto').checked,updated:nowIso()});if(r&&r.error)throw r.error}catch(e){return toast('Gagal: '+(e.message||e)+' (hanya admin)')}toast('Setting tersimpan');loadSettings()};
 
 /* ---------- panel admin: log kegagalan & versi pengguna ---------- */
 async function loadLog(){
-  const kind=$('#logKind').value;let q=sb.from('app_log').select('*').order('at',{ascending:false}).limit(200);
-  if(kind)q=q.eq('kind',kind);
-  const {data,error}=await q;
+  const kind=$('#logKind').value;let data=null,error=null;
+  try{data=(await DATA.listLog(kind)).data}catch(e){error=e}
   const T=$('#tLog');
   if(error){T.innerHTML='<tr><td class="empty">Gagal memuat log: '+esc(error.message)+' — sudah jalankan UPDATE_SQL_log.sql?</td></tr>';return}
   $('#logInfo').textContent=(data||[]).length+' kejadian terakhir';
@@ -653,13 +869,13 @@ async function loadLog(){
     ((data&&data.length)?data.map(r=>`<tr><td>${jkt(r.at)}</td><td>${esc(r.email||'')}</td><td><span class="b ${r.kind==='upload'?'bad':'warn'}">${esc(r.kind||'')}</span></td><td class="sub">${esc(r.file_name||'')}${r.po_id?'<br>'+esc(r.po_id):''}</td><td>${r.file_size?(r.file_size/1048576).toFixed(2)+' MB':'-'}</td><td class="sub">${esc(r.message||'')}</td><td class="sub">${esc(r.app_version||'')}</td><td class="sub">${esc(r.ua||'')}</td></tr>`).join(''):'<tr><td colspan="8" class="empty">Tidak ada kegagalan tercatat 🎉</td></tr>');
 }
 async function loadUsers(){
-  const {data,error}=await sb.from('profiles').select('display_name,email,role,app_version,last_seen').order('last_seen',{ascending:false,nullsFirst:false});
-  const T=$('#tUsers');if(error){T.innerHTML='<tr><td class="empty">'+esc(error.message)+'</td></tr>';return}
+  let data=null,error=null;try{data=(await DATA.listProfiles()).data;(data||[]).sort((a,b)=>String(b.last_seen||'').localeCompare(String(a.last_seen||'')))}catch(e){error=e}
+  const T=$('#tUsers');if(error){T.innerHTML='<tr><td class="empty">'+esc(error.message||error)+'</td></tr>';return}
   T.innerHTML='<tr><th>Petugas</th><th>Email</th><th>Peran</th><th>Versi aplikasi</th><th>Terakhir membuka</th></tr>'+
     (data||[]).map(r=>{const lama=r.app_version&&r.app_version!==APP_VERSION;return `<tr><td><b>${esc(r.display_name||'')}</b></td><td class="sub">${esc(r.email||'')}</td><td>${esc(r.role||'')}</td><td>${r.app_version?(lama?'<span class="b bad">'+esc(r.app_version)+' — versi lama</span>':'<span class="b ok">'+esc(r.app_version)+'</span>'):'<span class="b mut">belum tercatat</span>'}</td><td>${r.last_seen?jkt(r.last_seen):'-'}</td></tr>`}).join('');
 }
 $('#btnLog').onclick=loadLog;$('#logKind').addEventListener('change',loadLog);$('#btnUsers').onclick=loadUsers;
-$('#btnLogClear').onclick=async()=>{const cut=new Date(Date.now()-30*864e5).toISOString();const {error}=await sb.from('app_log').delete().lt('at',cut);toast(error?('Gagal: '+error.message):'Log lebih dari 30 hari dihapus');loadLog()};
+$('#btnLogClear').onclick=async()=>{try{const r=await DATA.cleanLog();if(r&&r.error)throw r.error;toast('Log lebih dari 30 hari dihapus')}catch(e){toast('Gagal: '+(e.message||e))}loadLog()};
 
 /* ---------- diagnostik upload ---------- */
 $('#diagVer').textContent='versi aplikasi '+APP_VERSION;
@@ -669,24 +885,41 @@ $('#btnDiag').onclick=async()=>{
   const ua=navigator.userAgent;
   put('Waktu',new Date().toLocaleString('id-ID',{timeZone:TZ}));
   put('Versi aplikasi',APP_VERSION);
+  put('Sumber data',BACKEND==='d1'?('Cloudflare D1 — '+(API||'(API_URL kosong)')):'Supabase Postgres');
   put('Perangkat',/iPhone|iPad/.test(ua)?'iPhone/iPad':/Android/.test(ua)?'Android':/Mac/.test(ua)?'Mac':/Windows/.test(ua)?'Windows':'lain');
   put('Browser',(ua.match(/(Chrome|CriOS|Firefox|Safari|Edg)\/[\d.]+/)||['tidak dikenal'])[0]);
   put('Online',navigator.onLine?'ya':'TIDAK');
-  put('pdf.js (baca PDF)',window.pdfjsLib?'termuat':'TIDAK TERMUAT — PDF tidak bisa dibaca otomatis');
-  put('xlsx (export Excel)',window.XLSX?'termuat':'belum termuat (dimuat saat dipakai)');
-  put('Pembacaan AI',sample?('aktif, mode '+(CFG.GEMINI_MODE||'edge')):'TIDAK AKTIF');
-  if(!sb){put('Supabase','TIDAK TERHUBUNG — config.js belum benar');$('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';return}
-  let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
-  put('Sesi login',sess?('aktif — '+sess.user.email):'TIDAK ADA — silakan keluar lalu masuk lagi');
-  if(sess&&sess.expires_at)put('Sesi berlaku s/d',new Date(sess.expires_at*1000).toLocaleString('id-ID',{timeZone:TZ}));
+  put('pdf.js (baca PDF)',window.pdfjsLib?'termuat':'dimuat saat ada PDF (hemat)');
+  put('xlsx (export Excel)',window.XLSX?'termuat':'dimuat saat export (hemat)');
+  put('Sumber pustaka',LIB.startsWith('http')?'CDN':'lokal (hosting sendiri)');
+  put('Pembacaan AI',sample?('aktif, mode '+(CFG.GEMINI_MODE||'edge')+(CFG.GEMINI_MODE==='worker'?' → '+(CFG.GEMINI_URL||'(URL kosong)'):'')):'TIDAK AKTIF');
+  put('Penyimpanan dokumen',STORE==='r2'?'Cloudflare R2':'Supabase Storage');
+  put('Cara login',AUTH_MODE==='access'?'Cloudflare Access':'Supabase (email + sandi)');
+  let sess=null;
+  if(AUTH_MODE==='access'){
+    try{const me=(await apiFetch('/me')).data;put('Identitas','aktif — '+me.email+' (via '+(me.via||'access')+')')}
+    catch(e){put('Identitas','GAGAL — '+(e.message||e)+' · muat ulang halaman untuk login Access')}
+  }else{
+    if(!sb){put('Supabase','TIDAK TERHUBUNG — config.js belum benar');$('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';return}
+    try{sess=(await sb.auth.getSession()).data.session}catch(e){}
+    put('Sesi login',sess?('aktif — '+sess.user.email):'TIDAK ADA — silakan keluar lalu masuk lagi');
+    if(sess&&sess.expires_at)put('Sesi berlaku s/d',new Date(sess.expires_at*1000).toLocaleString('id-ID',{timeZone:TZ}));
+  }
   put('Peran',isAdmin?'admin':'staf');
-  try{const t0=Date.now();const {error}=await sb.from('po').select('id').limit(1);put('Baca database',error?('GAGAL — '+error.message):('ok ('+(Date.now()-t0)+' ms)'))}catch(e){put('Baca database','GAGAL — '+e.message)}
+  try{const t0=Date.now();const r=await DATA.listPo();put('Baca database',(r&&r.error)?('GAGAL — '+r.error.message):('ok ('+(Date.now()-t0)+' ms, '+((r.data||[]).length)+' baris)'))}catch(e){put('Baca database','GAGAL — '+(e.message||e))}
   // uji upload file kecil
   try{const blob=new Blob(['uji upload '+new Date().toISOString()],{type:'text/plain'});
-    const path='_diagnostik/'+(sess?sess.user.id.slice(0,8):'anon')+'_'+Date.now()+'.txt';
-    const t0=Date.now();const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:'text/plain',upsert:false});
-    if(error)put('Uji upload','GAGAL — '+uploadErrMsg(error)+' ['+(error.message||'')+']');
-    else{put('Uji upload','BERHASIL ('+(Date.now()-t0)+' ms)');try{await sb.storage.from(BUCKET).remove([path])}catch(e){}}
+    const path='_diagnostik/'+((uid||'anon').slice(0,8))+'_'+Date.now()+'.txt';
+    const t0=Date.now();
+    if(STORE==='r2'){
+      const res=await fetch(API+'/file?path='+encodeURIComponent(path),{method:'POST',credentials:'include',headers:{'X-File-Type':'text/plain',...(await authHeaders())},body:blob});
+      if(!res.ok){const j=await res.json().catch(()=>null);put('Uji upload','GAGAL — R2 '+res.status+' '+((j&&j.error)||''))}
+      else put('Uji upload','BERHASIL ('+(Date.now()-t0)+' ms, R2)');
+    }else{
+      const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:'text/plain',upsert:false});
+      if(error)put('Uji upload','GAGAL — '+uploadErrMsg(error)+' ['+(error.message||'')+']');
+      else{put('Uji upload','BERHASIL ('+(Date.now()-t0)+' ms)');try{await sb.storage.from(BUCKET).remove([path])}catch(e){}}
+    }
   }catch(e){put('Uji upload','GAGAL — '+(e.message||e))}
   put('Catatan','bila Uji upload BERHASIL tetapi dokumen tetap gagal, kirim juga nama & ukuran file yang gagal');
   $('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';
@@ -695,7 +928,6 @@ $('#btnDiagCopy').onclick=async()=>{try{await navigator.clipboard.writeText($('#
 
 /* ---------- import xlsx ---------- */
 let XL=null;$('#impFile').onchange=()=>{$('#btnImport').disabled=!$('#impFile').files[0]};
-async function loadXlsx(){if(window.XLSX)return;await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s)})}
 $('#btnImport').onclick=async()=>{
   const file=$('#impFile').files[0];if(!file)return;const from=$('#impDari').value||'2026-11-01';$('#btnImport').disabled=true;const log=m=>$('#impLog').textContent=m;
   try{log('Membaca file…');await loadXlsx();const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});
