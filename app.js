@@ -22,6 +22,7 @@ const saveLs=()=>{try{localStorage.setItem('po_ui',JSON.stringify(ls))}catch(e){
 
 /* ---------- state ---------- */
 /* ================= Supabase data layer ================= */
+const APP_VERSION='2026-11-14a';
 const CFG=window.APP_CONFIG||{};
 if(!CFG.SUPABASE_URL||!CFG.SUPABASE_ANON_KEY){document.addEventListener('DOMContentLoaded',()=>{const m=document.getElementById('loginMsg');if(m)m.innerHTML='<b style="color:var(--bad)">config.js belum diisi.</b> Salin config.example.js → config.js dan isi SUPABASE_URL &amp; SUPABASE_ANON_KEY.'})}
 const sb=(window.supabase&&CFG.SUPABASE_URL)?window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_ANON_KEY):null;
@@ -38,7 +39,31 @@ async function loadProfiles(){const {data}=await sb.from('profiles').select('id,
 const urlCache={};
 function burl(id){if(!id)return '';if(id in urlCache)return urlCache[id];urlCache[id]='';sb.storage.from(BUCKET).createSignedUrl(id,3600).then(r=>{urlCache[id]=(r.data&&r.data.signedUrl)||'';render();if($('#mbg').classList.contains('open')&&editing)refreshModalThumbs()}).catch(()=>{});return ''}
 function refreshModalThumbs(){document.querySelectorAll('[data-burl]').forEach(el=>{const u=burl(el.dataset.burl);if(u){if(el.tagName==='IMG')el.src=u;else el.href=u}})}
-async function uploadDoc(blob,kind,ext){const path=`${jktDate()}/${(editing&&editing.id)||'new'}_${kind}_${Date.now()}.${ext}`;const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:blob.type||(ext==='pdf'?'application/pdf':'image/jpeg'),upsert:false});if(error)throw error;return path}
+const MAXB=20*1024*1024;
+function uploadErrMsg(error){const m=((error&&error.message)||'')+' '+((error&&(error.statusCode||error.status))||'');
+  if(/exceeded the maximum allowed size|Payload too large|413/i.test(m))return 'file melebihi batas 20 MB di server';
+  if(/row-level security|Unauthorized|not authorized|403/i.test(m))return 'tidak punya izin upload (policy storage) — jalankan ulang schema.sql';
+  if(/jwt|expired|invalid token|401/i.test(m))return 'sesi login habis — keluar lalu masuk lagi';
+  if(/quota|storage limit|insufficient|over.?limit/i.test(m))return 'kuota penyimpanan Supabase penuh';
+  if(/Bucket not found|404/i.test(m))return "bucket 'dokumen' tidak ditemukan di Supabase";
+  if(/Failed to fetch|NetworkError|network/i.test(m))return 'koneksi internet terputus saat upload';
+  return (error&&error.message)||'gagal upload';}
+async function uploadDoc(blob,kind,ext){
+  if(!blob)throw new Error('file kosong');
+  if(blob.size>MAXB)throw new Error('ukuran '+(blob.size/1048576).toFixed(1)+' MB melebihi batas 20 MB');
+  let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
+  if(!sess)throw new Error('sesi login habis — keluar lalu masuk lagi');
+  const base=`${jktDate()}/${(editing&&editing.id)||'new'}_${kind}_${Date.now()}`;
+  let last=null;
+  for(let att=0;att<2;att++){
+    const path=base+(att?'_r'+att:'')+'.'+ext;
+    const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:blob.type||(ext==='pdf'?'application/pdf':'image/jpeg'),upsert:false});
+    if(!error)return path;
+    last=error;const msg=uploadErrMsg(error);
+    if(!/koneksi internet terputus|gagal upload/.test(msg))throw new Error(msg);
+    await new Promise(r=>setTimeout(r,900));
+  }
+  throw new Error(uploadErrMsg(last));}
 /* ---- Gemini ---- */
 const blobToB64=b=>new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result).split(',')[1]);fr.onerror=rej;fr.readAsDataURL(b)});
 async function geminiJson(prompt,blobs){
@@ -223,10 +248,15 @@ $('#mSimpan').onclick=async()=>{
   if(inv&&!(editing&&editing.inv_no)){d.inv_at=now;d.inv_by=uid}if(!inv){d.inv_at=null;d.inv_by=null}
   $('#mSimpan').disabled=true;
   const t=totals(),note=$('#cNote').value.trim();const old=editing&&editing.cek||{};let anyChanged=false,uploadErr=false;
+  const upErrs=[];
   for(const S of SLOTS){for(const e of docs[S.k]){if(e.saved||!e.file)continue;
-    try{const usePdf=e.isPdf&&e.file.size<=20*1024*1024;e.asset=await uploadDoc(usePdf?e.file:e.pages[0],S.k,usePdf?'pdf':'jpg');e.pdf=usePdf;e.saved=true;e.at=now;e.by=uid;anyChanged=true}
-    catch(err){uploadErr=true;console.warn(err)}}}
-  if(uploadErr)toast('Sebagian lampiran gagal diupload — total tetap disimpan');
+    const hasPage=e.pages&&e.pages.length;
+    const asOrig=e.isPdf?e.file.size<=MAXB:!hasPage;
+    const blob=asOrig?e.file:e.pages[0];
+    const ext=asOrig?((e.name.split('.').pop()||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,5)||(e.isPdf?'pdf':'bin')):'jpg';
+    try{e.asset=await uploadDoc(blob,S.k,ext);e.pdf=e.isPdf;e.saved=true;e.at=now;e.by=uid;anyChanged=true;e.upErr=null}
+    catch(err){uploadErr=true;e.upErr=err.message||'gagal';upErrs.push(e.name+': '+e.upErr);console.warn('upload',e.name,err)}}}
+  if(uploadErr){SLOTS.forEach(S=>renderDrop(S));toast('Lampiran gagal diupload → '+upErrs[0]);}
   let r=null;const anyDoc=SLOTS.some(S=>docs[S.k].length);
   const any=anyDoc||TOT_SLOTS.some(S=>t[S.k]!=null)||note;
   if(any){const e=evalCek(t);const cek={note,status:e.status,selisih:e.selisih,detail:e.detail||'',missing:e.missing};
@@ -238,7 +268,7 @@ $('#mSimpan').onclick=async()=>{
       cek[S.k+'_at']=first?first.at:(tv!=null?(old[S.k+'_at']||now):null);cek[S.k+'_by']=first?first.by:(tv!=null?(old[S.k+'_by']||uid):null)});
     cek.at=(anyChanged||!old.at)?now:old.at;cek.by=(anyChanged||!old.by)?uid:old.by;d.cek=cek;r=e.status;if(d.nominal==null&&t.esb!=null)d.nominal=t.esb;
   }else d.cek=null;
-  try{await sbSave(newId,d);if(oldId&&oldId!==newId)await sbDelete(oldId);$('#mbg').classList.remove('open');toast('Tersimpan ✓ '+jktTime(now)+(r?' · '+r:''));loadPos()}catch(e){toast('Gagal simpan: '+(e.message||e.code))}
+  try{await sbSave(newId,d);if(oldId&&oldId!==newId)await sbDelete(oldId);$('#mbg').classList.remove('open');toast('Tersimpan ✓ '+jktTime(now)+(r?' · '+r:'')+(uploadErr?' · ⚠ '+upErrs.length+' lampiran GAGAL diupload, buka lagi barisnya untuk ulangi':''));loadPos()}catch(e){toast('Gagal simpan: '+(e.message||e.code))}
   $('#mSimpan').disabled=false;
 };
 $('#mHapus').onclick=async()=>{if(!editing)return;
@@ -325,15 +355,15 @@ async function takeFiles(fileList,S){
   d.innerHTML='⏳ memproses '+files.length+' file…';
   if(!S.multi)docs[S.k]=[];
   for(const file of files){
-    try{
-      const {pages,total}=await toImages(file);
-      const entry={saved:false,name:file.name,file,pages,isPdf:file.type==='application/pdf',size:file.size,npages:total,no:null,total:null,parsed:null};
-      if(entry.isPdf){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt}catch(err){console.warn('parse',err)}}
-      docs[S.k].push(entry);
-    }catch(e){toast('Gagal membaca '+file.name+': '+e.message)}
+    if(file.size>MAXB){toast(file.name+' terlalu besar ('+(file.size/1048576).toFixed(1)+' MB) — maksimal 20 MB');continue}
+    let r={pages:[],total:1,why:'tidak terbaca'};
+    try{r=await toImages(file)}catch(e){r={pages:[],total:1,why:e.message||'tidak terbaca'}}
+    const entry={saved:false,name:file.name,file,pages:r.pages,noPreview:!r.pages.length,why:r.why||'',isPdf:file.type==='application/pdf'||/\.pdf$/i.test(file.name),size:file.size,npages:r.total,no:null,total:null,parsed:null};
+    if(entry.isPdf&&window.pdfjsLib){try{const txt=await pdfText(file);entry.parsed=parseEsb(txt);entry.txt=txt}catch(err){console.warn('parse',err)}}
+    docs[S.k].push(entry);
   }
   renderDrop(S);recalcSlot(S);
-  if(S.tot){const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.total==null&&!e.aiTried);
+  if(S.tot){const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.aiTried);
     for(const e of need){if(!S.ai_auto&&e.parsed&&e.parsed.type)continue;e.aiTried=true;await aiRead(S,e)}}
 }
 function renderDrop(S){
@@ -342,10 +372,11 @@ function renderDrop(S){
   d.className='drop has';
   const rows=list.map((e,i)=>{
     const u=e.saved?(e.pdf?null:burl(e.asset)):(e.pages?URL.createObjectURL(e.pages[0]):null);
-    const thumbHtml=e.saved&&e.pdf?'<span class="filepdf">PDF</span>':(u?`<img class="thumb" ${e.saved?'data-burl="'+e.asset+'"':''} src="${u}">`:'<span class="filepdf">DOC</span>');
+    const thumbHtml=(e.saved&&e.pdf)||(!e.saved&&e.isPdf)?'<span class="filepdf">PDF</span>':(u?`<img class="thumb" ${e.saved?'data-burl="'+e.asset+'"':''} src="${u}">`:'<span class="filepdf">FILE</span>');
     const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
     const link=e.saved?`<a href="${burl(e.asset)||'#'}" data-burl="${e.asset}" target="_blank" onclick="event.stopPropagation()">buka</a>`:'';
-    return `<div class="filerow">${thumbHtml}<div class="fileinfo"><div class="filename">${esc(e.name||('dokumen '+(i+1)))}</div><div class="sub">${meta} ${link}</div></div><button type="button" class="xdel" data-del="${S.k}:${i}" title="hapus dokumen">×</button></div>`;
+    const note=e.upErr?'<div class="warnx">⚠ gagal diupload: '+esc(e.upErr)+'</div>':e.noPreview?'<div class="warnx">tetap akan diupload · pratinjau &amp; baca otomatis tidak tersedia: '+esc(e.why||'')+' — isi total manual</div>':'';
+    return `<div class="filerow">${thumbHtml}<div class="fileinfo"><div class="filename">${esc(e.name||('dokumen '+(i+1)))}</div><div class="sub">${meta} ${link}</div>${note}</div><button type="button" class="xdel" data-del="${S.k}:${i}" title="hapus dokumen">×</button></div>`;
   }).join('');
   d.innerHTML=`<div class="drophead">${S.icon} <b>${S.label}</b> <span class="b mut">${list.length} dokumen</span></div>${rows}<div class="sub" style="margin-top:6px">${S.multi?'klik untuk menambah dokumen lagi':'klik untuk mengganti dokumen'}</div>`;
 }
@@ -396,38 +427,23 @@ function recalcSlot(S,silent){
   calcRes();
 }
 
-async function canvasToJpeg(bmp){const max=2000,sc=Math.min(1,max/Math.max(bmp.width,bmp.height));const c=document.createElement('canvas');c.width=Math.round(bmp.width*sc);c.height=Math.round(bmp.height*sc);c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);return await new Promise(r=>c.toBlob(r,'image/jpeg',0.9))}
+async function canvasToJpeg(src){const bmp={width:src.naturalWidth||src.width,height:src.naturalHeight||src.height};const max=2000,sc=Math.min(1,max/Math.max(bmp.width,bmp.height));const c=document.createElement('canvas');c.width=Math.round(bmp.width*sc);c.height=Math.round(bmp.height*sc);c.getContext('2d').drawImage(src,0,0,c.width,c.height);return await new Promise(r=>c.toBlob(r,'image/jpeg',0.9))}
 async function toImages(file){
-  if(file.type==='application/pdf'){
-    if(!window.pdfjsLib)throw new Error('pdf.js tidak tersedia');
-    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;const pages=[];
-    for(let i=1;i<=Math.min(pdf.numPages,MAX_PAGES);i++){const page=await pdf.getPage(i);const vp=page.getViewport({scale:2});const c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;pages.push(await canvasToJpeg(c))}
-    return {pages,total:pdf.numPages};
+  const isPdf=file.type==='application/pdf'||/\.pdf$/i.test(file.name);
+  if(isPdf){
+    if(!window.pdfjsLib)return {pages:[],total:1,why:'pdf.js tidak termuat (jaringan memblokir cdnjs?)'};
+    try{
+      const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;const pages=[];
+      for(let i=1;i<=Math.min(pdf.numPages,MAX_PAGES);i++){const page=await pdf.getPage(i);const vp=page.getViewport({scale:2});const c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;pages.push(await canvasToJpeg(c))}
+      return {pages,total:pdf.numPages};
+    }catch(e){return {pages:[],total:1,why:'PDF tidak bisa dibuka ('+(e.message||'')+')'}}
   }
-  return {pages:[await canvasToJpeg(await createImageBitmap(file))],total:1};
+  try{return {pages:[await canvasToJpeg(await createImageBitmap(file))],total:1}}catch(e){}
+  try{const url=URL.createObjectURL(file);
+    const im=await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error('format gambar tidak didukung browser ini'));i.src=url});
+    const b=await canvasToJpeg(im);URL.revokeObjectURL(url);return {pages:[b],total:1};
+  }catch(e){return {pages:[],total:1,why:(e.message||'gambar tidak terbaca')+' (mis. foto HEIC dari iPhone)'}}
 }
-async function pdfText(file){const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';for(let i=1;i<=Math.min(pdf.numPages,MAX_PAGES);i++){const c=await (await pdf.getPage(i)).getTextContent();text+=c.items.map(it=>it.str).join(' ')+'\n'}return text}
-function parseEsb(text){
-  const t=text.replace(/\s+/g,' ');
-  const num=s=>{if(!s)return null;s=s.trim();if(/,\d{1,2}$/.test(s))s=s.replace(/\./g,'').replace(',','.');else s=s.replace(/[.,]/g,'');const n=parseFloat(s);return isNaN(n)?null:n};
-  const r={type:null,po_no:null,gr_no:null,inv_no:null,total:null,supplier:null,region:null,inv_dist:null,date:null};
-  if(/Purchase Invoice/i.test(t)&&/\bVI\d{10,}/.test(t))r.type='esb';else if(/Goods Receipt/i.test(t)&&/\bGR\d{10,}/.test(t))r.type='gr';else if(/Purchase Order/i.test(t)&&/\bPO\d{10,}/.test(t))r.type='po';
-  const m=(re)=>{const x=t.match(re);return x?x[1].trim():null};
-  r.po_no=m(/\b(PO\d{10,})\b/);r.gr_no=m(/\b(GR\d{10,})\b/);r.inv_no=m(/\b(VI\d{10,})\b/);
-  if(r.type==='po')r.total=num(m(/Grand Total\s*:?\s*([\d.]+,\d{2})/i));
-  if(r.type==='esb')r.total=num(m(/Invoice Total\s*:?\s*([\d.]+,\d{2})/i));
-  if(!r.type){const all=[...t.matchAll(/(?:Grand Total|Total Tagihan|Jumlah(?: yang harus dibayar)?|Total)\s*:?\s*(?:Rp\.?)?\s*([\d.]{4,}(?:,\d{2})?)/gi)];if(all.length)r.total=num(all[all.length-1][1])}
-  r.supplier=m(/(?:Supplier|Source)\s*:\s*((?:JKT|BLI|JOG|JTM|JTG|PT\.?|CV\.?)[^:]*?)\s+(?:Purchase Date|Invoice Due|Currency|Delivery Number|Cost Center|Branch|Address|Invoice Date|Reference Date)\b/i)
-    ||m(/\b((?:JKT|BLI|JOG|JTM|JTG)\s*-\s*[A-Z0-9][A-Z0-9 .,()&'-]{3,}?)(?=\s+(?:Purchase|Invoice|Currency|Delivery|Reference|Branch|Cost|Address)\b)/);
-  if(r.supplier)r.supplier=r.supplier.replace(/\s+(?:Invoice Due Date.*|Purchase Date.*)$/i,'').trim();
-  const br=m(/WAREHOUSE\s+(JELUPANG|BALI|JOGJA|YOGYAKARTA|JATENG|JATIM|SEMARANG|SURABAYA|JAKARTA)/i);
-  if(br){const b=br.toUpperCase();r.region=b==='JOGJA'?'YOGYAKARTA':b==='SEMARANG'?'JATENG':b==='SURABAYA'?'JATIM':b==='JAKARTA'?'JELUPANG':b}
-  if(r.type==='esb'){r.inv_dist=m(/Supplier Invoice\s*(?:Number)?\s*:\s*([A-Z0-9][A-Z0-9\/._-]{2,})/i);if(r.inv_dist&&/^Number$/i.test(r.inv_dist))r.inv_dist=null;}
-  const dd=m(/(?:Purchase Date|GR Date|Invoice Date)\s*:\s*(\d{2}\/[A-Za-z]{3}\/\d{4})/);
-  if(dd){const MO={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',mei:'05',jun:'06',jul:'07',aug:'08',agu:'08',sep:'09',oct:'10',okt:'10',nov:'11',dec:'12',des:'12'};const [d_,mo,y]=dd.split('/');r.date=MO[mo.toLowerCase()]?y+'-'+MO[mo.toLowerCase()]+'-'+d_:null}
-  return r;
-}
-let parsedDates={};
 function totals(){const t={};TOT_SLOTS.forEach(S=>t[S.k]=parseRp($('#'+S.tot).value));return t}
 function evalCek(t){const tol=SET.toleransi||0;const have=TOT_SLOTS.filter(S=>t[S.k]!=null);const missing=TOT_SLOTS.filter(S=>t[S.k]==null).map(S=>SLOT_SHORT[S.k]);
   const pairs=[['po','fisik'],['fisik','esb'],['po','esb']];const bad=[],good=[];
@@ -499,6 +515,38 @@ function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
 
 /* ---------- settings ---------- */
 $('#btnSaveSet').onclick=async()=>{const {error}=await sb.from('settings').upsert({id:1,target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,updated:nowIso()});if(error)return toast('Gagal: '+error.message+' (hanya admin)');toast('Setting tersimpan');loadSettings()};
+
+/* ---------- diagnostik upload ---------- */
+$('#diagVer').textContent='versi aplikasi '+APP_VERSION;
+$('#btnDiag').onclick=async()=>{
+  const out=$('#diagOut');out.style.display='';$('#btnDiag').disabled=true;const L=[];
+  const put=(k,v)=>{L.push(k.padEnd(22,' ')+': '+v);out.textContent=L.join('\n')};
+  const ua=navigator.userAgent;
+  put('Waktu',new Date().toLocaleString('id-ID',{timeZone:TZ}));
+  put('Versi aplikasi',APP_VERSION);
+  put('Perangkat',/iPhone|iPad/.test(ua)?'iPhone/iPad':/Android/.test(ua)?'Android':/Mac/.test(ua)?'Mac':/Windows/.test(ua)?'Windows':'lain');
+  put('Browser',(ua.match(/(Chrome|CriOS|Firefox|Safari|Edg)\/[\d.]+/)||['tidak dikenal'])[0]);
+  put('Online',navigator.onLine?'ya':'TIDAK');
+  put('pdf.js (baca PDF)',window.pdfjsLib?'termuat':'TIDAK TERMUAT — PDF tidak bisa dibaca otomatis');
+  put('xlsx (export Excel)',window.XLSX?'termuat':'belum termuat (dimuat saat dipakai)');
+  put('Pembacaan AI',sample?('aktif, mode '+(CFG.GEMINI_MODE||'edge')):'TIDAK AKTIF');
+  if(!sb){put('Supabase','TIDAK TERHUBUNG — config.js belum benar');$('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';return}
+  let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
+  put('Sesi login',sess?('aktif — '+sess.user.email):'TIDAK ADA — silakan keluar lalu masuk lagi');
+  if(sess&&sess.expires_at)put('Sesi berlaku s/d',new Date(sess.expires_at*1000).toLocaleString('id-ID',{timeZone:TZ}));
+  put('Peran',isAdmin?'admin':'staf');
+  try{const t0=Date.now();const {error}=await sb.from('po').select('id').limit(1);put('Baca database',error?('GAGAL — '+error.message):('ok ('+(Date.now()-t0)+' ms)'))}catch(e){put('Baca database','GAGAL — '+e.message)}
+  // uji upload file kecil
+  try{const blob=new Blob(['uji upload '+new Date().toISOString()],{type:'text/plain'});
+    const path='_diagnostik/'+(sess?sess.user.id.slice(0,8):'anon')+'_'+Date.now()+'.txt';
+    const t0=Date.now();const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:'text/plain',upsert:false});
+    if(error)put('Uji upload','GAGAL — '+uploadErrMsg(error)+' ['+(error.message||'')+']');
+    else{put('Uji upload','BERHASIL ('+(Date.now()-t0)+' ms)');try{await sb.storage.from(BUCKET).remove([path])}catch(e){}}
+  }catch(e){put('Uji upload','GAGAL — '+(e.message||e))}
+  put('Catatan','bila Uji upload BERHASIL tetapi dokumen tetap gagal, kirim juga nama & ukuran file yang gagal');
+  $('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';
+};
+$('#btnDiagCopy').onclick=async()=>{try{await navigator.clipboard.writeText($('#diagOut').textContent);toast('Hasil diagnostik disalin — tempel di WhatsApp ke admin')}catch(e){toast('Tidak bisa menyalin — screenshot saja')}};
 
 /* ---------- import xlsx ---------- */
 let XL=null;$('#impFile').onchange=()=>{$('#btnImport').disabled=!$('#impFile').files[0]};
