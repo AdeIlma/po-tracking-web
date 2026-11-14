@@ -93,6 +93,23 @@
     <div id="impLog" class="sub" style="margin-top:8px"></div>
     <div class="bar" style="margin-top:6px"><i id="impBar" style="width:0"></i></div>
   </div>
+  <div class="card" id="cardLog" style="display:none">
+    <h2>Log kegagalan (khusus admin)</h2>
+    <div class="sub" style="margin-bottom:8px">Tercatat otomatis setiap kali upload / simpan / pembacaan AI gagal di perangkat siapa pun — tidak perlu menunggu laporan user.</div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn p" id="btnLog">Muat log</button>
+      <label class="f">Jenis<select id="logKind"><option value="">Semua</option><option value="upload">Upload dokumen</option><option value="simpan">Simpan data</option><option value="ai">Pembacaan AI</option><option value="muat">Muat data</option></select></label>
+      <span class="sub" id="logInfo" style="margin-left:auto"></span>
+      <button class="btn" id="btnLogClear">Hapus log &gt; 30 hari</button>
+    </div>
+    <div class="tw"><table id="tLog"></table></div>
+  </div>
+  <div class="card" id="cardUsers" style="display:none">
+    <h2>Pengguna &amp; versi aplikasi (khusus admin)</h2>
+    <div class="sub" style="margin-bottom:8px">Untuk memastikan semua orang sudah memakai versi terbaru setelah deploy. Tercatat saat tiap orang membuka aplikasi.</div>
+    <div class="row" style="margin-bottom:8px"><button class="btn" id="btnUsers">Muat ulang</button></div>
+    <div class="tw" style="max-height:none"><table id="tUsers"></table></div>
+  </div>
   <div class="card">
     <h2>Diagnostik — kalau upload dokumen gagal</h2>
     <div class="sub" style="margin-bottom:8px">Klik tombol ini di komputer/HP yang bermasalah, lalu kirim hasilnya (tombol Salin hasil) ke admin.</div>

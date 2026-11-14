@@ -33,13 +33,15 @@ function toRow(id,d){const row={id};PO_COLS.forEach(c=>{if(c==='id')return;let v
 function fromRow(r){const d={...r};['po_at','gr_at','inv_at','inv_terima_at','tunggu_inv_at','tunggu_inv_selesai','created','updated'].forEach(c=>{if(d[c])d[c]=new Date(d[c]).toISOString()});['gr_no','inv_no','gr_return','inv_dist','keterangan','supplier','tgl_gudang','barang_terima','po_no'].forEach(c=>{if(d[c]==null)d[c]=''});if(d.nominal!=null)d.nominal=Number(d.nominal);['po_nos','gr_nos'].forEach(c=>{if(!Array.isArray(d[c]))d[c]=d[c]?[].concat(d[c]):[]});return d}
 async function sbSave(id,d){const {error}=await sb.from('po').upsert(toRow(id,d));if(error)throw error}
 async function sbDelete(id){const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error}
-async function loadPos(){const {data,error}=await sb.from('po').select('*').order('created',{ascending:false}).limit(5000);if(error){toast('Gagal memuat PO: '+error.message);return}POS=data.map(fromRow);render()}
+async function loadPos(){const {data,error}=await sb.from('po').select('*').order('created',{ascending:false}).limit(5000);if(error){toast('Gagal memuat PO: '+error.message);logFail('muat',error.message);return}POS=data.map(fromRow);render()}
 async function loadSettings(){const {data}=await sb.from('settings').select('*').eq('id',1).maybeSingle();if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi)}}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
 async function loadProfiles(){const {data}=await sb.from('profiles').select('id,display_name,email,role');(data||[]).forEach(p=>{names[p.id]=p.display_name||(p.email||'').split('@')[0]||'Petugas';if(p.id===uid)isAdmin=p.role==='admin'})}
 const urlCache={};
 function burl(id){if(!id)return '';if(id in urlCache)return urlCache[id];urlCache[id]='';sb.storage.from(BUCKET).createSignedUrl(id,3600).then(r=>{urlCache[id]=(r.data&&r.data.signedUrl)||'';render();if($('#mbg').classList.contains('open')&&editing)refreshModalThumbs()}).catch(()=>{});return ''}
 function refreshModalThumbs(){document.querySelectorAll('[data-burl]').forEach(el=>{const u=burl(el.dataset.burl);if(u){if(el.tagName==='IMG')el.src=u;else el.href=u}})}
 const MAXB=20*1024*1024;
+const uaShort=()=>{const u=navigator.userAgent;const dev=/iPhone|iPad/.test(u)?'iOS':/Android/.test(u)?'Android':/Mac/.test(u)?'Mac':/Windows/.test(u)?'Win':'?';const br=(u.match(/(Chrome|CriOS|Firefox|Edg|Safari)\/[\d.]+/)||['?'])[0];return dev+' '+br};
+async function logFail(kind,message,extra){try{if(!sb||!uid)return;await sb.from('app_log').insert({user_id:uid,email:(names[uid]||''),kind,message:String(message||'').slice(0,400),app_version:APP_VERSION,ua:uaShort(),...(extra||{})})}catch(e){}}
 function uploadErrMsg(error){const m=((error&&error.message)||'')+' '+((error&&(error.statusCode||error.status))||'');
   if(/exceeded the maximum allowed size|Payload too large|413/i.test(m))return 'file melebihi batas 20 MB di server';
   if(/row-level security|Unauthorized|not authorized|403/i.test(m))return 'tidak punya izin upload (policy storage) — jalankan ulang schema.sql';
@@ -100,6 +102,8 @@ async function afterLogin(session){
   uid=session.user.id;$('#loginBg').classList.remove('open');$('#btnLogout').style.display='';
   await loadProfiles();if(!names[uid]){await sb.from('profiles').upsert({id:uid,email:session.user.email});await loadProfiles()}
   $('#who').textContent='👤 '+(names[uid]||session.user.email)+(isAdmin?' · Admin':'');$('#myName').value=names[uid]||'';$('#myRole').textContent=isAdmin?'Peran: admin (bisa ubah setting & hapus PO)':'Peran: staf';
+  try{await sb.from('profiles').update({last_seen:new Date().toISOString(),app_version:APP_VERSION,ua:uaShort()}).eq('id',uid)}catch(e){}
+  if(isAdmin){$('#cardLog').style.display='';$('#cardUsers').style.display='';loadUsers()}
   await loadSettings();await loadPos();
   if(rtChannel)sb.removeChannel(rtChannel);
   rtChannel=sb.channel('po-live').on('postgres_changes',{event:'*',schema:'public',table:'po'},()=>{clearTimeout(window._rt);window._rt=setTimeout(loadPos,400)}).on('postgres_changes',{event:'*',schema:'public',table:'settings'},loadSettings).subscribe();
@@ -255,7 +259,8 @@ $('#mSimpan').onclick=async()=>{
     const blob=asOrig?e.file:e.pages[0];
     const ext=asOrig?((e.name.split('.').pop()||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,5)||(e.isPdf?'pdf':'bin')):'jpg';
     try{e.asset=await uploadDoc(blob,S.k,ext);e.pdf=e.isPdf;e.saved=true;e.at=now;e.by=uid;anyChanged=true;e.upErr=null}
-    catch(err){uploadErr=true;e.upErr=err.message||'gagal';upErrs.push(e.name+': '+e.upErr);console.warn('upload',e.name,err)}}}
+    catch(err){uploadErr=true;e.upErr=err.message||'gagal';upErrs.push(e.name+': '+e.upErr);console.warn('upload',e.name,err);
+      logFail('upload',e.upErr,{po_id:(editing&&editing.id)||po||null,file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null})}}}
   if(uploadErr){SLOTS.forEach(S=>renderDrop(S));toast('Lampiran gagal diupload → '+upErrs[0]);}
   let r=null;const anyDoc=SLOTS.some(S=>docs[S.k].length);
   const any=anyDoc||TOT_SLOTS.some(S=>t[S.k]!=null)||note;
@@ -268,7 +273,7 @@ $('#mSimpan').onclick=async()=>{
       cek[S.k+'_at']=first?first.at:(tv!=null?(old[S.k+'_at']||now):null);cek[S.k+'_by']=first?first.by:(tv!=null?(old[S.k+'_by']||uid):null)});
     cek.at=(anyChanged||!old.at)?now:old.at;cek.by=(anyChanged||!old.by)?uid:old.by;d.cek=cek;r=e.status;if(d.nominal==null&&t.esb!=null)d.nominal=t.esb;
   }else d.cek=null;
-  try{await sbSave(newId,d);if(oldId&&oldId!==newId)await sbDelete(oldId);$('#mbg').classList.remove('open');toast('Tersimpan ✓ '+jktTime(now)+(r?' · '+r:'')+(uploadErr?' · ⚠ '+upErrs.length+' lampiran GAGAL diupload, buka lagi barisnya untuk ulangi':''));loadPos()}catch(e){toast('Gagal simpan: '+(e.message||e.code))}
+  try{await sbSave(newId,d);if(oldId&&oldId!==newId)await sbDelete(oldId);$('#mbg').classList.remove('open');toast('Tersimpan ✓ '+jktTime(now)+(r?' · '+r:'')+(uploadErr?' · ⚠ '+upErrs.length+' lampiran GAGAL diupload, buka lagi barisnya untuk ulangi':''));loadPos()}catch(e){toast('Gagal simpan: '+(e.message||e.code));logFail('simpan',e.message||e.code,{po_id:newId})}
   $('#mSimpan').disabled=false;
 };
 $('#mHapus').onclick=async()=>{if(!editing)return;
@@ -498,6 +503,7 @@ async function aiRead(S,e){
     $('#'+S.ai).innerHTML='<span class="warnx">AI tidak menemukan total di '+esc(e.name)+(r&&r.note?' ('+esc(r.note)+')':'')+' — isi manual</span>';
     return false;
   }catch(err){e.reading=false;renderDrop(S);
+    logFail('ai',err.message||err.code,{file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null});
     $('#'+S.ai).innerHTML='<span class="warnx">AI gagal ('+esc(err.code||err.message||'')+') — isi total manual</span>';return false}
 }
 $('#btnAI').onclick=async()=>{
@@ -515,6 +521,26 @@ function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
 
 /* ---------- settings ---------- */
 $('#btnSaveSet').onclick=async()=>{const {error}=await sb.from('settings').upsert({id:1,target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,updated:nowIso()});if(error)return toast('Gagal: '+error.message+' (hanya admin)');toast('Setting tersimpan');loadSettings()};
+
+/* ---------- panel admin: log kegagalan & versi pengguna ---------- */
+async function loadLog(){
+  const kind=$('#logKind').value;let q=sb.from('app_log').select('*').order('at',{ascending:false}).limit(200);
+  if(kind)q=q.eq('kind',kind);
+  const {data,error}=await q;
+  const T=$('#tLog');
+  if(error){T.innerHTML='<tr><td class="empty">Gagal memuat log: '+esc(error.message)+' — sudah jalankan UPDATE_SQL_log.sql?</td></tr>';return}
+  $('#logInfo').textContent=(data||[]).length+' kejadian terakhir';
+  T.innerHTML='<tr><th>Waktu</th><th>Petugas</th><th>Jenis</th><th>File</th><th>Ukuran</th><th>Pesan</th><th>Versi</th><th>Perangkat</th></tr>'+
+    ((data&&data.length)?data.map(r=>`<tr><td>${jkt(r.at)}</td><td>${esc(r.email||'')}</td><td><span class="b ${r.kind==='upload'?'bad':'warn'}">${esc(r.kind||'')}</span></td><td class="sub">${esc(r.file_name||'')}${r.po_id?'<br>'+esc(r.po_id):''}</td><td>${r.file_size?(r.file_size/1048576).toFixed(2)+' MB':'-'}</td><td class="sub">${esc(r.message||'')}</td><td class="sub">${esc(r.app_version||'')}</td><td class="sub">${esc(r.ua||'')}</td></tr>`).join(''):'<tr><td colspan="8" class="empty">Tidak ada kegagalan tercatat 🎉</td></tr>');
+}
+async function loadUsers(){
+  const {data,error}=await sb.from('profiles').select('display_name,email,role,app_version,last_seen').order('last_seen',{ascending:false,nullsFirst:false});
+  const T=$('#tUsers');if(error){T.innerHTML='<tr><td class="empty">'+esc(error.message)+'</td></tr>';return}
+  T.innerHTML='<tr><th>Petugas</th><th>Email</th><th>Peran</th><th>Versi aplikasi</th><th>Terakhir membuka</th></tr>'+
+    (data||[]).map(r=>{const lama=r.app_version&&r.app_version!==APP_VERSION;return `<tr><td><b>${esc(r.display_name||'')}</b></td><td class="sub">${esc(r.email||'')}</td><td>${esc(r.role||'')}</td><td>${r.app_version?(lama?'<span class="b bad">'+esc(r.app_version)+' — versi lama</span>':'<span class="b ok">'+esc(r.app_version)+'</span>'):'<span class="b mut">belum tercatat</span>'}</td><td>${r.last_seen?jkt(r.last_seen):'-'}</td></tr>`}).join('');
+}
+$('#btnLog').onclick=loadLog;$('#logKind').addEventListener('change',loadLog);$('#btnUsers').onclick=loadUsers;
+$('#btnLogClear').onclick=async()=>{const cut=new Date(Date.now()-30*864e5).toISOString();const {error}=await sb.from('app_log').delete().lt('at',cut);toast(error?('Gagal: '+error.message):'Log lebih dari 30 hari dihapus');loadLog()};
 
 /* ---------- diagnostik upload ---------- */
 $('#diagVer').textContent='versi aplikasi '+APP_VERSION;
