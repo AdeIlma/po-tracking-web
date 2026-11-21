@@ -22,7 +22,7 @@ const saveLs=()=>{try{localStorage.setItem('po_ui',JSON.stringify(ls))}catch(e){
 
 /* ---------- state ---------- */
 /* ================= Supabase data layer ================= */
-const APP_VERSION='2026-11-14e';
+const APP_VERSION='2026-11-21d';
 const CFG=window.APP_CONFIG||{};
 /* AUTH_MODE: 'supabase' (email+password) | 'access' (Cloudflare Access, tanpa form login)
    STORAGE_BACKEND: 'supabase' (bucket dokumen) | 'r2' (Cloudflare R2 lewat Worker) */
@@ -43,7 +43,7 @@ async function initSb(){
 }
 const BUCKET=CFG.STORAGE_BUCKET||'dokumen';
 let db=null,userApi=null,assets=null,sample=null,downloads=true;
-const PO_COLS=['id','region','supplier','po_no','tgl','tgl_gudang','po_at','po_by','gr_no','gr_at','gr_by','inv_no','inv_at','inv_by','nominal','inv_dist','gr_return','keterangan','legacy','created','updated','po_nos','gr_nos','po_date','gr_date','inv_date','barang_terima','inv_terima_at','tunggu_inv','tunggu_inv_at','tunggu_inv_selesai','cek'];
+const PO_COLS=['id','region','supplier','po_no','tgl','tgl_gudang','po_at','po_by','gr_no','gr_at','gr_by','inv_no','inv_at','inv_by','nominal','inv_dist','gr_return','keterangan','legacy','created','updated','po_nos','gr_nos','po_date','gr_date','inv_date','barang_terima','inv_terima_at','tunggu_inv','tunggu_inv_at','tunggu_inv_selesai','cek','deleted_at','deleted_by'];
 function toRow(id,d){const row={id};PO_COLS.forEach(c=>{if(c==='id')return;let v=d[c];if(v===undefined)v=null;if(v==='' && ['po_at','gr_at','inv_at','inv_terima_at','tunggu_inv_at','tunggu_inv_selesai','created','updated','po_date','gr_date','inv_date','barang_terima','tgl','tgl_gudang','nominal'].includes(c))v=null;row[c]=v});row.check_status=d.cek?d.cek.status:null;return row}
 function fromRow(r){const d={...r};['po_at','gr_at','inv_at','inv_terima_at','tunggu_inv_at','tunggu_inv_selesai','created','updated'].forEach(c=>{if(d[c])d[c]=new Date(d[c]).toISOString()});['gr_no','inv_no','gr_return','inv_dist','keterangan','supplier','tgl_gudang','barang_terima','po_no'].forEach(c=>{if(d[c]==null)d[c]=''});if(d.nominal!=null)d.nominal=Number(d.nominal);['po_nos','gr_nos'].forEach(c=>{if(!Array.isArray(d[c]))d[c]=d[c]?[].concat(d[c]):[]});return d}
 /* ===== Lapisan data: 'supabase' (asal) atau 'd1' (Cloudflare) =====
@@ -68,11 +68,24 @@ async function apiFetch(path,opt){
 }
 const DATA={
   async listPo(){ if(BACKEND==='d1'){const j=await apiFetch('/po?limit=5000');return {data:j.data||[],error:null}}
-    return await sb.from('po').select('*').order('created',{ascending:false}).limit(5000); },
+    return await sb.from('po').select('*').is('deleted_at',null).order('created',{ascending:false}).limit(5000); },
+  // Keranjang sampah: baris yang dihapus tidak hilang, hanya ditandai.
+  async listTrash(){ if(BACKEND==='d1'){const j=await apiFetch('/po?trash=1&limit=1000');return {data:j.data||[],error:null}}
+    return await sb.from('po').select('*').not('deleted_at','is',null).order('deleted_at',{ascending:false}).limit(1000); },
+  async restorePo(id){ if(BACKEND==='d1'){await apiFetch('/po/restore',{method:'POST',body:JSON.stringify({id})});return}
+    const {error}=await sb.from('po').update({deleted_at:null,deleted_by:null}).eq('id',id);if(error)throw error; },
+  async purgePo(id){ if(BACKEND==='d1'){await apiFetch('/po/purge',{method:'POST',body:JSON.stringify({id})});return}
+    const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error; },
+  // Buang isi keranjang yang sudah lewat tenggat. Tenggatnya dihitung
+  // di database (jam server), bukan di browser.
+  async purgeExpired(){ if(BACKEND==='d1'){const j=await apiFetch('/po/purge-expired',{method:'POST',body:'{}'});return j.jumlah||0}
+    const {data,error}=await sb.rpc('purge_keranjang');if(error)throw error;return data||0; },
   async savePo(id,d){ if(BACKEND==='d1'){await apiFetch('/po',{method:'POST',body:JSON.stringify({row:toRow(id,d)})});return}
     const {error}=await sb.from('po').upsert(toRow(id,d));if(error)throw error; },
+  // Hapus lunak: baris tetap ada, hanya ditandai + dicatat siapa & kapan.
   async deletePo(id){ if(BACKEND==='d1'){await apiFetch('/po/delete',{method:'POST',body:JSON.stringify({id})});return}
-    const {error}=await sb.from('po').delete().eq('id',id);if(error)throw error; },
+    const {error}=await sb.from('po').update({deleted_at:new Date().toISOString(),deleted_by:uid}).eq('id',id);
+    if(error)throw error; },
   async getSettings(){ if(BACKEND==='d1'){const j=await apiFetch('/settings');return {data:j.data}}
     return await sb.from('settings').select('*').eq('id',1).maybeSingle(); },
   async saveSettings(row){ if(BACKEND==='d1'){await apiFetch('/settings',{method:'POST',body:JSON.stringify({row})});return {error:null}}
@@ -91,6 +104,24 @@ const DATA={
 async function sbSave(id,d){await DATA.savePo(id,d)}
 async function sbDelete(id){await DATA.deletePo(id)}
 let muatGagal=0;
+let sinkronTerakhir=null;
+async function tarikPerubahan(){
+  if(BACKEND!=='supabase'||!sb)return loadPos();
+  if(!sinkronTerakhir)return loadPos();
+  try{
+    const {data,error}=await sb.from('po').select('*').gt('updated',sinkronTerakhir).limit(500);
+    if(error)throw error;
+    if(data&&data.length){
+      data.forEach(row=>{
+        const i=POS.findIndex(p=>p.id===row.id);
+        if(row.deleted_at){if(i>=0)POS.splice(i,1)}
+        else if(i>=0)POS[i]=row;else POS.unshift(row);
+      });
+      render();
+    }
+    sinkronTerakhir=new Date().toISOString();
+  }catch(e){console.warn('tarikPerubahan',e)}
+}
 async function loadPos(percobaan){
   const n=percobaan||0;
   let res;
@@ -108,10 +139,11 @@ async function loadPos(percobaan){
     return;
   }
   muatGagal=0;if(uid&&names[uid])$('#who').textContent='👤 '+names[uid]+(isAdmin?' · Admin':'');
-  POS=data.map(fromRow);render();
+  POS=data.map(fromRow);sinkronTerakhir=new Date().toISOString();render();
 }
 window.addEventListener('online',()=>{toast('Koneksi kembali — memuat ulang data');loadPos()});
-async function loadSettings(){let data=null;try{data=(await DATA.getSettings()).data}catch(e){console.warn(e)}if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi),label_total:data.label_total||'',ai_auto:data.ai_auto!==false};$('#sLabel').value=SET.label_total;$('#sAiAuto').checked=SET.ai_auto}$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
+async function loadSettings(){let data=null;try{data=(await DATA.getSettings()).data}catch(e){console.warn(e)}if(data){SET={target_gr_h:data.target_gr_h,target_inv_h:data.target_inv_h,toleransi:Number(data.toleransi),label_total:data.label_total||'',ai_auto:data.ai_auto!==false,trash_days:(data.trash_days==null?14:Number(data.trash_days))};$('#sLabel').value=SET.label_total;$('#sAiAuto').checked=SET.ai_auto}
+  if($('#sTrashDays'))$('#sTrashDays').value=SET.trash_days;$('#sGr').value=SET.target_gr_h;$('#sInv').value=SET.target_inv_h;$('#sTol').value=SET.toleransi;render()}
 async function loadProfiles(){let data=null;try{data=(await DATA.listProfiles()).data}catch(e){console.warn(e)}(data||[]).forEach(p=>{names[p.id]=p.display_name||(p.email||'').split('@')[0]||'Petugas';if(p.id===uid)isAdmin=p.role==='admin'})}
 const urlCache={};const urlAntri=new Set();let urlTimer=null;
 function burl(id){if(!id)return '';
@@ -150,14 +182,39 @@ function uploadErrMsg(error){const m=((error&&error.message)||'')+' '+((error&&(
   if(/Bucket not found|404/i.test(m))return "bucket 'dokumen' tidak ditemukan di Supabase";
   if(/Failed to fetch|NetworkError|network/i.test(m))return 'koneksi internet terputus saat upload';
   return (error&&error.message)||'gagal upload';}
-async function uploadDoc(blob,kind,ext){
+/* Kompres gambar SEBELUM diupload.
+   Foto nota dari HP biasanya 2-5 MB, padahal yang dibutuhkan hanya
+   angkanya terbaca. Dikecilkan ke sisi terpanjang 1600 px JPEG q0.8
+   biasanya tinggal 150-350 KB — hemat sekitar 90% tanpa membuat
+   angkanya tidak terbaca. PDF tidak disentuh.
+   Matikan dengan KOMPRES_UPLOAD:false di config.js kalau perlu. */
+const SIMPAN_PX=Number(CFG.SIMPAN_MAX_PX)||1600;
+const SIMPAN_Q=Number(CFG.SIMPAN_Q)||0.8;
+async function kecilkanSimpan(blob){
+  if(CFG.KOMPRES_UPLOAD===false)return null;
+  if(!blob||!/^image\//.test(blob.type||''))return null;
+  try{
+    const bm=await createImageBitmap(blob);
+    const sk=Math.min(1,SIMPAN_PX/Math.max(bm.width,bm.height));
+    const w=Math.max(1,Math.round(bm.width*sk)),h=Math.max(1,Math.round(bm.height*sk));
+    const c=document.createElement('canvas');c.width=w;c.height=h;
+    c.getContext('2d').drawImage(bm,0,0,w,h);
+    const out=await new Promise(r=>c.toBlob(r,'image/jpeg',SIMPAN_Q));
+    if(out&&out.size&&out.size<blob.size*0.9)return out;   // hanya kalau benar-benar lebih kecil
+  }catch(e){console.warn('kompres upload gagal, pakai aslinya',e)}
+  return null;
+}
+async function uploadDoc(blob,kind,ext,idPaksa){
   if(!blob)throw new Error('file kosong');
+  const kecil=await kecilkanSimpan(blob);
+  if(kecil){blob=kecil;ext='jpg'}
+  // batas ukuran diperiksa SETELAH dikompres, jadi foto besar tidak lagi gagal
   if(blob.size>MAXB)throw new Error('ukuran '+(blob.size/1048576).toFixed(1)+' MB melebihi batas 20 MB');
   if(AUTH_MODE!=='access'){
     let sess=null;try{sess=(await sb.auth.getSession()).data.session}catch(e){}
     if(!sess)throw new Error('sesi login habis — keluar lalu masuk lagi');
   }
-  const base=`${jktDate()}/${(editing&&editing.id)||'new'}_${kind}_${Date.now()}`;
+  const base=`${jktDate()}/${idPaksa||(editing&&editing.id)||'new'}_${kind}_${Date.now()}`;
   let last=null;
   for(let att=0;att<2;att++){
     const path=base+(att?'_r'+att:'')+'.'+ext;
@@ -222,7 +279,7 @@ async function geminiJson(prompt,blobs){
 sample=((CFG.GEMINI_MODE||'edge')==='off')?null:{json:geminiJson};
 let aiOff=false;   // true bila kuota Gemini habis → berhenti memanggil AI sampai halaman dimuat ulang
 let uid=null,canWrite=true,isAdmin=false;
-let POS=[],SET={target_gr_h:24,target_inv_h:48,toleransi:0,label_total:'',ai_auto:true};
+let POS=[],SET={target_gr_h:24,target_inv_h:48,toleransi:0,label_total:'',ai_auto:true,trash_days:14};
 const names={};
 async function resolveNames(ids){const need=[...new Set(ids.filter(i=>i&&!(i in names)))];if(!need.length)return;await loadProfiles();need.forEach(i=>{if(!(i in names))names[i]=''})}
 const nm=id=>id?(names[id]||'Petugas'):'-';
@@ -230,7 +287,9 @@ const nm=id=>id?(names[id]||'Petugas'):'-';
 /* ---------- nav ---------- */
 guard('nav',()=>{document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));});
 function show(v){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.v===v));document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='v-'+v));ls.view=v;saveLs();render()}
-guard('regions',()=>{['#dRegion','#oRegion','#pRegion','#mRegion'].forEach(s=>{const el=$(s);REGIONS.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;el.appendChild(o)})});});
+guard('regions',()=>{['#dRegion','#oRegion','#pRegion','#mRegion','#tmpRegion','#sRegion'].forEach(s=>{const el=$(s);if(!el)return;REGIONS.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;el.appendChild(o)})});
+  const tr=$('#tmpRegion');if(tr)tr.value='YOGYAKARTA';});
+guard('filters2',()=>{['#sRegion','#sStatus','#sSort'].forEach(x=>{const el=$(x);if(el)el.addEventListener('change',()=>render())})});
 guard('filters',()=>{['#dPeriode','#dRegion','#oRegion','#oSort','#pRegion','#pStatus','#pDari','#pSampai'].forEach(s=>$(s).addEventListener('change',()=>{poShown=150;render()}));$('#pCari').addEventListener('input',()=>{poShown=150;render()});});
 
 /* ---------- boot: auth + data ---------- */
@@ -241,14 +300,40 @@ async function afterLogin(U){
   if(!names[uid]){try{if(BACKEND==='supabase')await sb.from('profiles').upsert({id:uid,email:U.email});else await DATA.updateProfile({display_name:(U.email||'').split('@')[0]})}catch(e){console.warn(e)};await loadProfiles()}
   $('#who').textContent='👤 '+(names[uid]||U.email)+(isAdmin?' · Admin':'');$('#myName').value=names[uid]||'';$('#myRole').textContent=isAdmin?'Peran: admin (bisa ubah setting & hapus PO)':'Peran: staf';
   try{await DATA.updateProfile({last_seen:new Date().toISOString(),app_version:APP_VERSION,ua:uaShort()})}catch(e){console.warn(e)}
-  if(isAdmin){$('#cardLog').style.display='';$('#cardUsers').style.display='';loadUsers()}
+  if(isAdmin){
+    $('#cardLog').style.display='';$('#cardUsers').style.display='';loadUsers();
+    if($('#sTrashDays'))$('#sTrashDays').disabled=false;
+    // Cadangan kalau pg_cron belum diaktifkan. Diam-diam, sehari sekali saja.
+    try{
+      const kmrn=ls.purge||'';
+      if(kmrn!==jktDate()){
+        const n=await DATA.purgeExpired();
+        ls.purge=jktDate();saveLs();
+        if(n)toast(n+' baris keranjang yang sudah lewat '+(SET.trash_days||14)+' hari dibuang');
+      }
+    }catch(e){console.warn('purge',e)}
+  }
   await loadSettings();await loadPos();
   if(BACKEND==='supabase'){
     if(rtChannel)sb.removeChannel(rtChannel);
-    rtChannel=sb.channel('po-live').on('postgres_changes',{event:'*',schema:'public',table:'po'},()=>{clearTimeout(window._rt);window._rt=setTimeout(loadPos,400)}).on('postgres_changes',{event:'*',schema:'public',table:'settings'},loadSettings).subscribe();
+    /* Dulu: setiap perubahan oleh siapa pun -> SEMUA browser mengunduh
+       ulang seluruh tabel PO. Dengan 10 orang, satu klik Simpan berarti
+       10 kali unduh penuh. Sekarang baris yang berubah diterapkan
+       langsung dari pesan realtime-nya (±3 KB, bukan megabyte). */
+    rtChannel=sb.channel('po-live').on('postgres_changes',{event:'*',schema:'public',table:'po'},(msg)=>{
+      const row=msg&&msg.new&&msg.new.id?msg.new:null;
+      if(!row){clearTimeout(window._rt);window._rt=setTimeout(loadPos,3000);return}  // DELETE: baru muat ulang
+      const i=POS.findIndex(p=>p.id===row.id);
+      if(row.deleted_at){if(i>=0)POS.splice(i,1)}
+      else if(i>=0)POS[i]=row;
+      else POS.unshift(row);
+      clearTimeout(window._rtR);window._rtR=setTimeout(()=>{try{render()}catch(e){}},300);
+    }).on('postgres_changes',{event:'*',schema:'public',table:'settings'},loadSettings).subscribe();
   }else{
     if(window._poll)clearInterval(window._poll);
-    window._poll=setInterval(()=>{if(!document.hidden&&!$('#mbg').classList.contains('open'))loadPos()},30000);
+    // Cadangan kalau realtime mati: ambil HANYA baris yang berubah sejak
+    // sinkron terakhir, bukan seluruh tabel tiap 30 detik.
+    window._poll=setInterval(()=>{if(!document.hidden&&!$('#mbg').classList.contains('open'))tarikPerubahan()},45000);
     window.addEventListener('focus',()=>{if(!$('#mbg').classList.contains('open'))loadPos()});
   }
 }
@@ -298,12 +383,81 @@ const cekDone=c=>c&&(c.status==='MATCH'||c.status==='SELISIH');
 const cekBadge=p=>{const c=cekOf(p);if(!c)return '<span class="b mut">belum dicek</span>';
   const lbl=c.status==='MATCH'?'<span class="b ok">MATCH</span>':c.status==='SELISIH'?'<span class="b bad">SELISIH '+fmtRp(Math.abs(c.selisih))+'</span>':'<span class="b warn">menunggu '+((c.missing&&c.missing.length)?c.missing.join(', '):'dokumen')+'</span>';
   const tot=TOT_SLOTS.map(S=>SLOT_SHORT[S.k]+' '+(c['total_'+S.k]!=null?fmtRp(c['total_'+S.k]):'—')).join(' · ');
-  const th=SLOTS.map(S=>{const list=(c[S.k+'_docs']&&c[S.k+'_docs'].length)?c[S.k+'_docs']:(c[S.k+'_asset']?[{asset:c[S.k+'_asset'],pdf:c[S.k+'_pdf']}]:[]);
-    return list.map(x=>{const u=burl(x.asset);return `<a href="${u||'#'}" target="_blank" title="${S.label}${x.no?' '+x.no:''}">${x.pdf?'<span class="thumb" style="width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--red)">PDF</span>':'<img class="thumb" src="'+u+'" style="width:30px;height:30px">'}</a>`}).join('')}).join('');
+  /* Dulu di sini setiap lampiran ditampilkan sebagai gambar kecil 30px.
+     Masalahnya: yang diunduh browser tetap FOTO UKURAN PENUH, dan karena
+     signed URL-nya berganti tiap render, cache browser tidak pernah
+     terpakai — jadi tiap kali daftar digambar ulang, semua foto di semua
+     baris diunduh lagi. Itu penyebab utama egress 150%.
+     Sekarang cuma lencana jumlah; gambarnya dilihat saat baris dibuka. */
+  const th=SLOTS.map(S=>{
+    const list=(c[S.k+'_docs']&&c[S.k+'_docs'].length)?c[S.k+'_docs']:(c[S.k+'_asset']?[{asset:c[S.k+'_asset'],pdf:c[S.k+'_pdf']}]:[]);
+    if(!list.length)return '';
+    const hilang=list.filter(x=>x.purged).length;
+    return '<span class="b mut" title="'+esc(S.label)+': '+list.length+' dokumen'+(hilang?', '+hilang+' filenya sudah dihapus':'')+'">'
+      +SLOT_SHORT[S.k]+' '+list.length+(hilang?'<span class="sub"> ('+hilang+'✕)</span>':'')+'</span>';
+  }).join(' ');
   return lbl+(c.detail?'<div class="sub"'+(c.status==='SELISIH'?' style="color:var(--bad)"':'')+'>'+esc(c.detail)+'</div>':'')+'<div class="sub" style="margin-top:3px">'+tot+'</div><div class="row" style="gap:4px;margin-top:3px">'+th+'</div>'};
 
 /* ---------- render ---------- */
-function render(){renderCounts();const v=ls.view||'dash';if(v==='dash')renderDash();else if(v==='out')renderOut();else if(v==='po')renderPo();}
+function render(){renderCounts();if($('#pillSel'))$('#pillSel').textContent=POS.filter(p=>p.cek&&p.cek.status==='SELISIH').length;const v=ls.view||'dash';if(v==='dash')renderDash();else if(v==='out')renderOut();else if(v==='po')renderPo();else if(v==='sel')renderSel();}
+
+/* ---------- daftar selisih ----------
+   Inti sistem ini: melihat baris mana yang totalnya tidak sama, dan
+   berapa bedanya. Di PO Tracking selisih cuma tampil sebagai lencana
+   per baris; di sini dikumpulkan, diurut dari yang terbesar, dengan
+   ketiga totalnya berdampingan supaya langsung terlihat mana yang beda. */
+function barisSel(){
+  const reg=$('#sRegion')?$('#sRegion').value:'';
+  const mode=$('#sStatus')?$('#sStatus').value:'SELISIH';
+  const urut=$('#sSort')?$('#sSort').value:'besar';
+  let list=POS.filter(p=>p.cek&&(!reg||p.region===reg));
+  if(mode==='SELISIH')list=list.filter(p=>p.cek.status==='SELISIH');
+  else if(mode==='BELUM')list=list.filter(p=>p.cek.status!=='MATCH'&&(p.cek.missing||[]).length);
+  list.sort(urut==='besar'
+    ? (a,b)=>Math.abs(b.cek.selisih||0)-Math.abs(a.cek.selisih||0)
+    : (a,b)=>String(b.cek.at||'').localeCompare(String(a.cek.at||'')));
+  return list;
+}
+function renderSel(){
+  const list=barisSel();
+  const tot=list.reduce((a,p)=>a+Math.abs(p.cek.selisih||0),0);
+  const bedaSaja=list.filter(p=>p.cek.status==='SELISIH');
+  $('#selRingkas').innerHTML=list.length
+    ? '<b>'+list.length+'</b> baris · '+bedaSaja.length+' selisih · nilai selisih <b>'+fmtRp(tot)+'</b>'
+    : 'Tidak ada baris yang cocok dengan filter ini.';
+  const sl=k=>(p)=>{const v=p.cek['total_'+k];return v==null?'<span class="sub">—</span>':fmtRp(v)};
+  const tp=sl('po'),tf=sl('fisik'),te=sl('esb');
+  $('#tSel').innerHTML='<tr><th>Tanggal</th><th>Region</th><th>No PO</th><th>Supplier</th><th>Total PO</th><th>Total Fisik</th><th>Total ESB</th><th>Selisih</th><th>Keterangan</th><th></th></tr>'+
+    (list.length?list.map(p=>{
+      const c=p.cek,beda=c.status==='SELISIH';
+      const nilai=c.selisih!=null&&beda?'<span class="b bad">'+fmtRp(c.selisih)+'</span>'
+        :c.status==='MATCH'?'<span class="b ok">MATCH</span>':'<span class="b mut">—</span>';
+      const kurang=(c.missing||[]).length?'<div class="sub">menunggu '+esc((c.missing||[]).join(', '))+'</div>':'';
+      return '<tr><td>'+fmtTgl(p.tgl)+(c.at?'<div class="sub">dicek '+jkt(c.at)+'</div>':'')+'</td>'+
+        '<td><span class="b mut">'+esc(p.region)+'</span></td>'+
+        '<td class="mono">'+esc(p.po_no||'(tanpa no PO)')+(p.inv_no?'<div class="sub mono">'+esc(p.inv_no)+'</div>':'')+'</td>'+
+        '<td>'+esc((p.supplier||'-').slice(0,26))+'</td>'+
+        '<td>'+tp(p)+'</td><td>'+tf(p)+'</td><td>'+te(p)+'</td>'+
+        '<td>'+nilai+'</td>'+
+        '<td class="sub">'+esc(c.detail||'')+kurang+(c.note?'<div class="sub">catatan: '+esc(c.note)+'</div>':'')+'</td>'+
+        '<td><button class="btn sm p" data-edit="'+esc(p.id)+'">Buka</button></td></tr>';
+    }).join('')
+    :'<tr><td colspan="10" class="empty">Belum ada hasil cek. Upload dokumen lewat <b>+ PO Baru</b>, <b>Edit</b>, atau <b>Proses banyak dokumen sekaligus</b> di Pengaturan.</td></tr>');
+}
+if($('#btnSelCsv'))$('#btnSelCsv').onclick=()=>{
+  const list=barisSel();
+  if(!list.length)return toast('Tidak ada baris untuk diexport');
+  const H=['Tanggal','Region','No PO','No Invoice','Supplier','Total PO','Total Fisik','Total ESB','Selisih','Status','Keterangan','Dicek','Oleh'];
+  const baris=list.map(p=>{const c=p.cek;return [p.tgl||'',p.region||'',p.po_no||'',p.inv_no||'',p.supplier||'',
+    c.total_po??'',c.total_fisik??'',c.total_esb??'',c.selisih??'',c.status||'',
+    (c.detail||'')+((c.missing||[]).length?' | menunggu '+(c.missing||[]).join(', '):''),
+    c.at?jkt(c.at):'',nm(c.by)]});
+  const csv=[H,...baris].map(r=>r.map(v=>{v=String(v==null?'':v);return /[",;\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}).join(';')).join('\r\n');
+  const url=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));
+  const a=document.createElement('a');a.href=url;a.download='selisih_'+jktDate()+'.csv';a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+  toast(list.length+' baris diexport');
+};
 function renderCounts(){const o=POS.filter(p=>status(p)!=='done').length;$('#pillOut').textContent=o;$('#pillOut').title=POS.filter(isTunggu).length+' di antaranya menunggu invoice distributor';$('#pillCek').textContent=POS.filter(p=>p.cek&&p.cek.status==='SELISIH').length;}
 
 function kpiRows(list){
@@ -432,7 +586,7 @@ $('#mSimpan').onclick=async()=>{
   const any=anyDoc||TOT_SLOTS.some(S=>t[S.k]!=null)||note;
   if(any){const e=evalCek(t);const cek={note,status:e.status,selisih:e.selisih,detail:e.detail||'',missing:e.missing};
     SLOTS.forEach(S=>{const list=docs[S.k].filter(x=>x.asset);
-      cek[S.k+'_docs']=list.map(x=>({name:x.name||null,no:x.no||null,total:x.total!=null?x.total:null,src:x.src||null,label:x.aiLabel||null,asset:x.asset,pdf:!!x.pdf,at:x.at||old[S.k+'_at']||now,by:x.by||old[S.k+'_by']||uid,npages:x.npages||1}));
+      cek[S.k+'_docs']=list.map(x=>({name:x.name||null,no:x.no||null,total:x.total!=null?x.total:null,src:x.src||null,label:x.aiLabel||null,asset:x.asset,pdf:!!x.pdf,purged:!!x.purged,purged_at:x.purged_at||null,at:x.at||old[S.k+'_at']||now,by:x.by||old[S.k+'_by']||uid,npages:x.npages||1}));
       const tv=S.tot?t[S.k]:null;const first=list[0]||null;
       if(tv!==(old['total_'+S.k]??null))anyChanged=true;
       cek['total_'+S.k]=tv;cek[S.k+'_asset']=first?first.asset:null;cek[S.k+'_pdf']=first?!!first.pdf:false;
@@ -444,7 +598,7 @@ $('#mSimpan').onclick=async()=>{
 };
 $('#mHapus').onclick=async()=>{if(!editing)return;
   if($('#mHapus').dataset.c!=='1'){$('#mHapus').dataset.c='1';$('#mHapus').textContent='⚠ Klik lagi: hapus '+(editing.po_no||'baris ini')+' permanen';setTimeout(()=>{if($('#mHapus').dataset.c==='1'){$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus PO ini'}},6000);return}
-  try{const no=editing.po_no||editing.id;await sbDelete(editing.id);$('#mbg').classList.remove('open');toast('Dihapus: '+no);loadPos()}catch(e){toast('Gagal menghapus: '+(e.message||e.code))}$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus'};
+  try{const no=editing.po_no||editing.id;await sbDelete(editing.id);$('#mbg').classList.remove('open');toast('Dihapus: '+no+' — masih bisa dipulihkan di Pengaturan › Keranjang sampah');loadPos()}catch(e){toast('Gagal menghapus: '+(e.message||e.code))}$('#mHapus').dataset.c='';$('#mHapus').textContent='Hapus'};
 
 /* ---------- Export CSV / Excel ---------- */
 function exportRows(){
@@ -524,6 +678,98 @@ document.addEventListener('click',e=>{const p=e.target.closest('[data-pick]');
   const b=e.target.closest('[data-del]');if(!b)return;e.stopPropagation();const [k,i]=b.dataset.del.split(':');docs[k].splice(+i,1);const S=slotOf(k);renderDrop(S);recalcSlot(S,true)});
 
 const LIB=(CFG.LIB_BASE||'https://cdnjs.cloudflare.com/ajax/libs/');
+/* ===== OCR (Tesseract.js) =====
+   Pembagian tugas sesuai stack:
+     pdf.js   -> ambil teks dari PDF digital
+     Tesseract-> kenali teks dari hasil scan / foto
+     logika   -> tentukan mana angka totalnya (if/else, tanpa AI)
+     Gemini   -> hanya untuk yang tidak terbaca ketiganya
+   Dijalankan di browser, bukan di server: tidak ada kuota, tidak ada
+   batas waktu Edge Function, dan dokumen tidak perlu dikirim ke mana pun. */
+const OCR_ON=CFG.OCR_ENABLED!==false;
+const OCR_LANG=CFG.OCR_LANG||'ind';
+const OCR_CDN=CFG.OCR_CDN||'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+const OCR_MAX_PAGES=Number(CFG.OCR_MAX_PAGES)||2;
+const OCR_TIMEOUT=(Number(CFG.OCR_TIMEOUT_S)||60)*1000;   // per halaman
+const OCR_LOAD_TIMEOUT=(Number(CFG.OCR_LOAD_TIMEOUT_S)||25)*1000;
+/* Pembatas waktu umum. Penting untuk OCR: kalau CDN-nya menggantung
+   (internet kantor, captive portal), tanpa ini tulisan "OCR membaca…"
+   tidak akan pernah hilang dan petugas menunggu tanpa ujung. */
+function batasWaktu(p,ms,pesan){
+  let j;
+  return Promise.race([
+    Promise.resolve(p).finally(()=>clearTimeout(j)),
+    new Promise((_,rej)=>{j=setTimeout(()=>{const e=new Error(pesan);e.code='TIMEOUT';rej(e)},ms)})
+  ]);
+}
+let ocrWorker=null,ocrOff=false,ocrSiap=null;
+async function ensureOcr(){
+  if(!OCR_ON||ocrOff)return null;
+  if(ocrWorker)return ocrWorker;
+  if(ocrSiap)return ocrSiap;                       // satu kali saja walau dipanggil serentak
+  ocrSiap=batasWaktu((async()=>{
+    if(!window.Tesseract)await loadScript(OCR_CDN);
+    if(!window.Tesseract)throw new Error('pustaka OCR gagal dimuat');
+    // Kalau pustakanya di-host sendiri, isi tiga jalur ini di config.js
+    // supaya tidak ada satu pun file dimuat dari CDN pihak ketiga.
+    const opsi={logger:()=>{}};
+    if(CFG.OCR_WORKER_PATH)opsi.workerPath=CFG.OCR_WORKER_PATH;
+    if(CFG.OCR_CORE_PATH)opsi.corePath=CFG.OCR_CORE_PATH;
+    if(CFG.OCR_LANG_PATH)opsi.langPath=CFG.OCR_LANG_PATH;
+    ocrWorker=await Tesseract.createWorker(OCR_LANG,1,opsi);
+    return ocrWorker;
+  })(),OCR_LOAD_TIMEOUT,'pustaka OCR tidak selesai dimuat dalam '+Math.round(OCR_LOAD_TIMEOUT/1000)+' detik');
+  try{return await ocrSiap}catch(e){ocrSiap=null;ocrOff=true;throw e}
+}
+async function ocrPages(pages,lapor){
+  const w=await ensureOcr();
+  if(!w)return '';
+  const ambil=pages.slice(0,OCR_MAX_PAGES);
+  let out='';
+  for(let i=0;i<ambil.length;i++){
+    if(lapor)lapor(i+1,ambil.length);
+    let r;
+    try{
+      r=await batasWaktu(w.recognize(ambil[i]),OCR_TIMEOUT,'OCR terlalu lama di halaman '+(i+1));
+    }catch(err){
+      // Bebaskan CPU: pekerjaan yang menggantung tidak bisa dibatalkan,
+      // jadi worker-nya dibuang dan dibuat baru saat dipakai lagi.
+      if(err.code==='TIMEOUT'){try{await ocrWorker.terminate()}catch(e){}ocrWorker=null;ocrSiap=null}
+      throw err;
+    }
+    out+=((r&&r.data&&r.data.text)||'')+'\n';
+  }
+  return out;
+}
+/* Baca satu dokumen dengan OCR, lalu tentukan totalnya pakai logika. */
+async function ocrRead(S,e){
+  if(!OCR_ON||ocrOff||!e.pages||!e.pages.length)return false;
+  const box=$('#'+S.ai);
+  try{
+    if(box)box.innerHTML='<span class="sub">⏳ OCR membaca '+esc(e.name)+'… (sekali muat pustaka ±'+(window.Tesseract?'cepat':'10 detik')+')</span>';
+    const txt=await ocrPages(e.pages,(n,t)=>{if(box)box.innerHTML='<span class="sub">⏳ OCR halaman '+n+'/'+t+' — '+esc(e.name)+'</span>'});
+    e.ocrTxt=txt;e.ocrDone=true;
+    if(!txt.trim()){if(box)box.innerHTML='<span class="warnx">OCR tidak menemukan teks di '+esc(e.name)+'</span>';return false}
+    // teks OCR dipakai jalur logika yang sama dengan teks PDF
+    if(!e.txt||!e.txtOk){e.txt=txt;e.txtFrom='ocr'}
+    const p=parseEsb(txt);
+    e.cands=allCandidates(txt).slice(0,6);
+    if(p.total!=null){
+      e.parsed=p;e.total=p.total;e.src='ocr';e.manual=false;e.aiLabel=p.total_label||'';e.txtOk=true;
+      renderDrop(S);recalcSlot(S,true);
+      if(box)box.innerHTML='✓ OCR: '+esc(e.name)+' → <b>'+fmtRp(e.total)+'</b>'+(p.total_label?' <span class="sub">('+esc(p.total_label)+')</span>':'')+' <span class="sub">· hasil OCR, mohon dicek dengan dokumennya</span>';
+      return true;
+    }
+    renderDrop(S);
+    if(box)box.innerHTML='<span class="sub">OCR dapat teksnya tapi belum menemukan total di '+esc(e.name)+' — pilih dari angka di bawah, atau coba <b>Baca dengan AI</b>.</span>';
+    return false;
+  }catch(err){
+    e.ocrDone=true;
+    logFail('ocr',String(err.message||err).slice(0,200),{file_name:(e.name||'').slice(0,120),file_size:e.file?e.file.size:null});
+    if(box)box.innerHTML='<span class="warnx">OCR gagal ('+esc(err.message||'')+') — coba <b>Baca dengan AI</b> atau ketik angkanya</span>';
+    return false;
+  }
+}
 function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('gagal memuat '+src));document.head.appendChild(s)})}
 let pdfSiap=null;
 async function ensurePdfJs(){
@@ -551,20 +797,31 @@ async function takeFiles(fileList,S){
     docs[S.k].push(entry);
   }
   renderDrop(S);recalcSlot(S);
-  if(S.tot&&SET.ai_auto!==false&&sample&&!aiOff){
-    const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.aiTried&&!e.txtOk);
-    for(const e of need){if(!S.ai_auto&&e.parsed&&e.parsed.type)continue;e.aiTried=true;await aiRead(S,e)}}
-  else if(S.tot){const sisa=docs[S.k].filter(e=>!e.saved&&e.total==null);
-    if(sisa.length)$('#'+S.ai).innerHTML='<span class="sub">Total belum terbaca dari teks — klik <b>Baca dengan AI</b> atau pilih/ketik angkanya.</span>'}
+  if(S.tot){
+    // Urutan sesuai stack: teks PDF -> OCR -> AI. Yang termurah dulu.
+    if(OCR_ON&&!ocrOff){
+      const perluOcr=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.txtOk&&!e.ocrDone);
+      for(const e of perluOcr)await ocrRead(S,e);
+    }
+    if(SET.ai_auto!==false&&sample&&!aiOff){
+      const need=docs[S.k].filter(e=>!e.saved&&e.pages&&e.pages.length&&e.total==null&&!e.aiTried&&!e.txtOk);
+      for(const e of need){if(!S.ai_auto&&e.parsed&&e.parsed.type)continue;e.aiTried=true;await aiRead(S,e)}
+    }
+    const sisa=docs[S.k].filter(e=>!e.saved&&e.total==null);
+    if(sisa.length&&!$('#'+S.ai).innerHTML.includes('⏳'))
+      $('#'+S.ai).innerHTML='<span class="sub">Total belum terbaca otomatis — pilih dari angka yang terdeteksi, klik <b>Baca OCR</b> / <b>Baca dengan AI</b>, atau ketik angkanya.</span>';
+  }
 }
 function renderDrop(S){
   const d=$('#'+S.drop),list=docs[S.k];
   if(!list.length){d.className='drop';d.innerHTML=S.icon+' <b>'+S.label+'</b><br><span class="sub">'+S.hint+'</span>';return}
   d.className='drop has';
   const rows=list.map((e,i)=>{
+    if(e.purged){const hal=e.total!=null?fmtRp(e.total):'—';
+      return `<div class="filerow"><span class="filepdf" style="opacity:.5">—</span><div class="fileinfo"><div>${esc(e.name||'dokumen')}</div><div class="sub">file sudah dihapus${e.purged_at?' ('+esc(String(e.purged_at).slice(0,10))+')':''} sesuai kebijakan simpan · total tercatat <b>${hal}</b></div></div></div>`}
     const u=e.saved?(e.pdf?null:burl(e.asset)):(e.pages?URL.createObjectURL(e.pages[0]):null);
     const thumbHtml=(e.saved&&e.pdf)||(!e.saved&&e.isPdf)?'<span class="filepdf">PDF</span>':(u?`<img class="thumb" ${e.saved?'data-burl="'+e.asset+'"':''} src="${u}">`:'<span class="filepdf">FILE</span>');
-    const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':e.src==='teks'?' <span class="sub">(dari teks'+(e.aiLabel?': '+esc(e.aiLabel):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
+    const meta=e.reading?'<span class="sub">⏳ AI membaca total…</span>':[e.no?'<b>'+esc(e.no)+'</b>':'',(!S.tot?'':(e.total!=null?fmtRp(e.total)+(e.src==='AI'?' <span class="sub">(AI'+(e.conf&&e.conf!=='tinggi'?', '+esc(e.conf):'')+')</span>':e.src==='teks'?' <span class="sub">(dari teks'+(e.aiLabel?': '+esc(e.aiLabel):'')+')</span>':e.src==='ocr'?' <span class="sub">(OCR'+(e.aiLabel?': '+esc(e.aiLabel):'')+')</span>':''):'<span class="warnx">total belum terbaca</span>')),e.npages>1?e.npages+' hal.':'',e.saved?'tersimpan':''].filter(Boolean).join(' · ');
     const link=e.saved?`<a href="${burl(e.asset)||'#'}" data-burl="${e.asset}" target="_blank" onclick="event.stopPropagation()">buka</a>`:'';
     const chips=(S.tot&&!e.saved&&e.cands&&e.cands.length)?'<div class="chips">Pilih angka dari dokumen: '+e.cands.map((c,ci)=>`<button type="button" class="chip${e.total!=null&&Math.abs(c.v-e.total)<0.5?' on':''}" data-pick="${S.k}:${i}:${ci}" title="${esc(c.label)}">${fmtRp(c.v)}</button>`).join('')+'</div>':'';
     const note=e.upErr?'<div class="warnx">⚠ gagal diupload: '+esc(e.upErr)+'</div>':e.noPreview?'<div class="warnx">tetap akan diupload · pratinjau &amp; baca otomatis tidak tersedia: '+esc(e.why||'')+' — isi total manual</div>':'';
@@ -839,6 +1096,16 @@ $('#btnText').onclick=()=>{
     if(ubah||docs[S.k].length){renderDrop(S);recalcSlot(S,true)}});
   toast(n?(n+' total terbaca dari teks dokumen'):(gagal?'Tidak ada total yang bisa dibaca dari teks — dokumen ini kemungkinan hasil scan/foto':'Tidak ada dokumen baru untuk dibaca'));
 };
+$('#btnOCR').onclick=async()=>{
+  if(!OCR_ON)return toast('OCR dimatikan di config.js (OCR_ENABLED)');
+  const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach(e=>{if(!e.saved&&e.pages&&e.pages.length&&S.tot&&e.total==null)jobs.push([S,e])}));
+  if(!jobs.length)return toast('Tidak ada dokumen yang perlu dibaca OCR');
+  $('#btnOCR').disabled=true;
+  let n=0;
+  for(const [S,e] of jobs){e.ocrDone=false;if(await ocrRead(S,e))n++}
+  $('#btnOCR').disabled=false;
+  toast(n?(n+' total terbaca lewat OCR'):'OCR belum menemukan total — pilih angkanya atau coba Baca dengan AI');
+};
 $('#btnAI').onclick=async()=>{
   const jobs=[];SLOTS.forEach(S=>docs[S.k].forEach(e=>{if(!e.saved&&e.pages&&e.pages.length&&S.tot)jobs.push([S,e])}));
   if(!jobs.length)return toast('Tidak ada dokumen baru untuk dibaca AI');
@@ -851,12 +1118,12 @@ $('#btnAI').onclick=async()=>{
 try{const k='ai_count_'+jktDate();const n=+localStorage.getItem(k)||0;if(n)document.addEventListener('DOMContentLoaded',()=>{$('#aiCount').textContent='AI dipakai '+n+'× hari ini (perangkat ini)'})}catch(e){}
 function resetCek(){parsedDates={};SLOTS.forEach(S=>{docs[S.k]=[];if(S.tot)$('#'+S.tot).value='';$('#'+S.ai).textContent='';renderDrop(S)});$('#cNote').value='';calcRes()}
 function loadSavedDocs(c){SLOTS.forEach(S=>{const arr=(c&&c[S.k+'_docs'])||[];
-  if(arr.length)docs[S.k]=arr.map(x=>({saved:true,name:x.name||S.label,no:x.no||null,total:x.total!=null?Number(x.total):null,asset:x.asset,pdf:!!x.pdf,at:x.at,by:x.by,npages:x.npages||1,src:x.src||null,aiLabel:x.label||null}));
+  if(arr.length)docs[S.k]=arr.map(x=>({saved:true,name:x.name||S.label,no:x.no||null,total:x.total!=null?Number(x.total):null,asset:x.asset,pdf:!!x.pdf,at:x.at,by:x.by,npages:x.npages||1,src:x.src||null,aiLabel:x.label||null,purged:!!x.purged,purged_at:x.purged_at||null}));
   else if(c&&c[S.k+'_asset'])docs[S.k]=[{saved:true,name:S.label,no:null,total:(c['total_'+S.k]!=null?Number(c['total_'+S.k]):null),asset:c[S.k+'_asset'],pdf:!!c[S.k+'_pdf'],at:c[S.k+'_at'],by:c[S.k+'_by'],npages:1}];
   renderDrop(S)})}
 
 /* ---------- settings ---------- */
-$('#btnSaveSet').onclick=async()=>{try{const r=await DATA.saveSettings({target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,label_total:$('#sLabel').value.trim(),ai_auto:$('#sAiAuto').checked,updated:nowIso()});if(r&&r.error)throw r.error}catch(e){return toast('Gagal: '+(e.message||e)+' (hanya admin)')}toast('Setting tersimpan');loadSettings()};
+$('#btnSaveSet').onclick=async()=>{try{const r=await DATA.saveSettings({target_gr_h:+$('#sGr').value||24,target_inv_h:+$('#sInv').value||48,toleransi:+$('#sTol').value||0,label_total:$('#sLabel').value.trim(),ai_auto:$('#sAiAuto').checked,trash_days:Math.max(1,+$('#sTrashDays').value||14),updated:nowIso()});if(r&&r.error)throw r.error}catch(e){return toast('Gagal: '+(e.message||e)+' (hanya admin)')}toast('Setting tersimpan');loadSettings()};
 
 /* ---------- panel admin: log kegagalan & versi pengguna ---------- */
 async function loadLog(){
@@ -879,6 +1146,61 @@ $('#btnLogClear').onclick=async()=>{try{const r=await DATA.cleanLog();if(r&&r.er
 
 /* ---------- diagnostik upload ---------- */
 $('#diagVer').textContent='versi aplikasi '+APP_VERSION;
+/* ---------- keranjang sampah ---------- */
+let TRASH=[];
+/* Sisa waktu sebelum dibuang otomatis. Hanya untuk ditampilkan —
+   keputusan membuang tetap di database, pakai jam server. */
+function sisaHari(deletedAt){
+  const hari=SET.trash_days||14;
+  if(!deletedAt)return '';
+  const lewat=(Date.now()-new Date(deletedAt).getTime())/86400000;
+  const sisa=Math.ceil(hari-lewat);
+  if(sisa<=0)return '<br><span class="warnx">jatuh tempo — akan dibuang saat pembersihan berikutnya</span>';
+  if(sisa<=3)return '<br><span class="warnx">tinggal '+sisa+' hari</span>';
+  return '<br><span class="sub">dibuang dalam '+sisa+' hari</span>';
+}
+async function loadTrash(){
+  const el=$('#tTrash');
+  el.innerHTML='<tr><td class="sub">memuat…</td></tr>';
+  try{
+    const {data,error}=await DATA.listTrash();
+    if(error)throw error;
+    TRASH=data||[];
+    await resolveNames(TRASH.map(p=>p.deleted_by));
+    $('#trashCount').textContent=(TRASH.length?(TRASH.length+' baris di keranjang'):'kosong')+' · dibuang otomatis setelah '+(SET.trash_days||14)+' hari';
+    $('#btnTrashAll').style.display=(isAdmin&&TRASH.length)?'':'none';
+    if(!TRASH.length){el.innerHTML='<tr><td class="sub">Keranjang kosong — belum ada PO yang dihapus.</td></tr>';return}
+    el.innerHTML='<tr><th>No PO</th><th>Supplier</th><th>Nominal</th><th>Dihapus</th><th>Oleh</th><th></th></tr>'+
+      TRASH.map(p=>'<tr><td><b>'+esc(p.po_no||'(tanpa no PO)')+'</b><div class="sub">'+esc(p.region||'')+'</div></td>'+
+        '<td>'+esc(p.supplier||'-')+'</td><td>'+(p.nominal!=null?fmtRp(p.nominal):'-')+'</td>'+
+        '<td class="sub">'+(p.deleted_at?jkt(p.deleted_at):'-')+sisaHari(p.deleted_at)+'</td>'+
+        '<td class="sub">'+esc(nm(p.deleted_by))+'</td>'+
+        '<td style="white-space:nowrap"><button class="btn" data-pulih="'+esc(p.id)+'">Pulihkan</button>'+
+        (isAdmin?' <button class="btn" data-buang="'+esc(p.id)+'">Hapus permanen</button>':'')+'</td></tr>').join('');
+    el.querySelectorAll('[data-pulih]').forEach(b=>b.onclick=async()=>{
+      b.disabled=true;
+      try{await DATA.restorePo(b.dataset.pulih);toast('Dipulihkan ✓');loadTrash();loadPos()}
+      catch(e){b.disabled=false;toast('Gagal memulihkan: '+(e.message||e))}
+    });
+    el.querySelectorAll('[data-buang]').forEach(b=>b.onclick=async()=>{
+      if(b.dataset.c!=='1'){b.dataset.c='1';b.textContent='Yakin? tidak bisa dibatalkan';setTimeout(()=>{if(b.dataset.c==='1'){b.dataset.c='';b.textContent='Hapus permanen'}},4000);return}
+      b.disabled=true;
+      try{await DATA.purgePo(b.dataset.buang);toast('Dihapus permanen');loadTrash()}
+      catch(e){b.disabled=false;b.dataset.c='';b.textContent='Hapus permanen';toast('Gagal: '+(e.message||e))}
+    });
+  }catch(e){el.innerHTML='<tr><td class="warnx">Gagal memuat keranjang: '+esc(e.message||e)+'</td></tr>'}
+}
+$('#btnTrash').onclick=()=>loadTrash();
+$('#btnTrashAll').onclick=async()=>{
+  const b=$('#btnTrashAll');
+  if(b.dataset.c!=='1'){b.dataset.c='1';b.textContent='Yakin kosongkan '+TRASH.length+' baris? TIDAK bisa dibatalkan';setTimeout(()=>{if(b.dataset.c==='1'){b.dataset.c='';b.textContent='Kosongkan keranjang'}},5000);return}
+  b.disabled=true;b.textContent='menghapus…';
+  let ok=0,gagal=0;
+  for(const p of TRASH.slice()){try{await DATA.purgePo(p.id);ok++}catch(e){gagal++}}
+  b.disabled=false;b.dataset.c='';b.textContent='Kosongkan keranjang';
+  toast('Terhapus permanen: '+ok+(gagal?(' · gagal '+gagal):''));
+  loadTrash();
+};
 $('#btnDiag').onclick=async()=>{
   const out=$('#diagOut');out.style.display='';$('#btnDiag').disabled=true;const L=[];
   const put=(k,v)=>{L.push(k.padEnd(22,' ')+': '+v);out.textContent=L.join('\n')};
@@ -925,6 +1247,404 @@ $('#btnDiag').onclick=async()=>{
   $('#btnDiag').disabled=false;$('#btnDiagCopy').style.display='';
 };
 $('#btnDiagCopy').onclick=async()=>{try{await navigator.clipboard.writeText($('#diagOut').textContent);toast('Hasil diagnostik disalin — tempel di WhatsApp ke admin')}catch(e){toast('Tidak bisa menyalin — screenshot saja')}};
+
+/* ================= proses banyak dokumen sekaligus =================
+   Inti dari sistem ini adalah membaca total dan melihat selisihnya.
+   Di sini puluhan dokumen dibaca sekali jalan, dicocokkan ke baris PO
+   lewat nomor yang tertulis di dokumennya, lalu selisihnya dihitung.
+   Tidak ada yang tersimpan sampai pengguna menekan Simpan. */
+let BATCH=[];
+function cariPo(info,slot){
+  const ada=(v,arr)=>v&&(arr||[]).includes(v);
+  if(slot==='esb'&&info.inv_no){const p=POS.find(p=>p.inv_no===info.inv_no);if(p)return {p,cara:'No Invoice'}}
+  if(info.po_no){const p=POS.find(p=>p.po_no===info.po_no||ada(info.po_no,p.po_nos));if(p)return {p,cara:'No PO'}}
+  if(info.gr_no){const p=POS.find(p=>p.gr_no===info.gr_no||ada(info.gr_no,p.gr_nos));if(p)return {p,cara:'No GR'}}
+  if(info.inv_no){const p=POS.find(p=>p.inv_no===info.inv_no);if(p)return {p,cara:'No Invoice'}}
+  if(info.inv_dist){const p=POS.find(p=>p.inv_dist&&p.inv_dist===info.inv_dist);if(p)return {p,cara:'No inv distributor'}}
+  return null;
+}
+/* Nota fisik sering tidak memuat nomor PO. Dicarikan calon lewat
+   totalnya: kalau sama dengan total PO atau total ESB sebuah baris,
+   besar kemungkinan itu barisnya. Tetap harus dipilih manusia. */
+/* Nama supplier di nota distributor tidak mengikuti pola ESB, jadi
+   dicocokkan lewat kata-kata yang muncul di awal dokumennya. */
+function kataSupplier(teks){
+  return [...new Set(String(teks||'').slice(0,250).toUpperCase().match(/[A-Z]{4,}/g)||[])]
+    .filter(k=>!/^(INVOICE|NOTA|FAKTUR|SURAT|JALAN|TOTAL|JUMLAH|DIBAYAR|TANGGAL|HARGA|BARANG|QTY|DISKON|PAJAK|KWITANSI|STRUK|HALAMAN|PURCHASE|SUPPLIER|NUMBER|DATE)$/.test(k));
+}
+function calonPo(b,lainnya){
+  const out=[],sudah=new Set();
+  const tol=Math.max(SET.toleransi||0,1);
+  const tambah=(p,sebab)=>{if(p&&!sudah.has(p.id)){sudah.add(p.id);out.push({p,sebab})}};
+  // 1) total sama dengan total yang SUDAH tersimpan di baris
+  if(b.total!=null)POS.forEach(p=>{const c=p.cek||{};
+    if([c.total_po,c.total_esb,p.nominal].some(v=>v!=null&&Math.abs(v-b.total)<=tol))tambah(p,'total sama')});
+  // 2) total sama dengan total file LAIN di tumpukan ini yang sudah dapat baris
+  if(b.total!=null)(lainnya||[]).forEach(x=>{
+    if(x===b||!x.target||x.total==null)return;
+    if(Math.abs(x.total-b.total)<=tol)tambah(POS.find(p=>p.id===x.target),'total sama dengan '+(SLOT_SHORT[x.slot]||x.slot)+' di tumpukan ini');
+  });
+  // 3) nama supplier
+  const kata=kataSupplier(b.teks||'').concat(b.info&&b.info.supplier?kataSupplier(b.info.supplier):[]);
+  if(out.length<6&&kata.length)POS.forEach(p=>{const sup=(p.supplier||'').toUpperCase();
+    if(sup&&kata.some(k=>sup.includes(k)))tambah(p,'supplier mirip')});
+  return out.slice(0,8);
+}
+$('#bFile').onchange=()=>{$('#btnBProses').disabled=!$('#bFile').files.length;$('#btnBSimpan').disabled=true;BATCH=[];$('#tB').innerHTML=''};
+$('#btnBProses').onclick=async()=>{
+  const files=[...$('#bFile').files];
+  if(!files.length)return;
+  $('#btnBProses').disabled=true;$('#btnBSimpan').disabled=true;$('#bWarn').style.display='none';
+  BATCH=[];
+  const pakaiOcr=$('#bOcr').checked;
+  for(let i=0;i<files.length;i++){
+    const f=files[i];
+    $('#bInfo').textContent='membaca '+(i+1)+'/'+files.length+' — '+f.name;
+    $('#bBar').style.width=Math.round(i/files.length*100)+'%';
+    const isPdf=/\.pdf$/i.test(f.name)||f.type==='application/pdf';
+    let teks='',cara='teks-pdf',pages=null,err='';
+    try{
+      if(isPdf)teks=await pdfText(f);
+      if(!teks.trim()){
+        if(pakaiOcr&&OCR_ON&&!ocrOff){
+          pages=await toImages(f);
+          teks=await ocrPages(pages,(n,t)=>{$('#bInfo').textContent='OCR '+(i+1)+'/'+files.length+' hal '+n+'/'+t+' — '+f.name});
+          cara='ocr';
+        }else{cara='tanpa teks'}
+      }
+    }catch(e){err=String(e.message||e).slice(0,90)}
+    const info=teks?parseEsb(teks):{type:null,po_no:null,gr_no:null,inv_no:null,total:null,supplier:null,inv_dist:null,date:null};
+    const slot=info.type||'fisik';
+    const nomor=slot==='po'?info.po_no:slot==='gr'?info.gr_no:slot==='esb'?info.inv_no:null;
+    const ketemu=cariPo(info,slot);
+    BATCH.push({file:f,name:f.name,isPdf,pages,cara,err,info,slot,nomor,
+      teks:(teks||'').slice(0,300),
+      total:info.total!=null?info.total:null,
+      target:ketemu?ketemu.p.id:'',caraCocok:ketemu?ketemu.cara:'',calon:[]});
+  }
+  $('#bBar').style.width='100%';
+  renderBatch();
+  $('#btnBProses').disabled=false;
+};
+function renderBatch(){
+  const siap=BATCH.filter(b=>b.target);
+  const tanpaTotal=BATCH.filter(b=>b.slot!=='gr'&&b.total==null);
+  $('#bInfo').innerHTML='<b>'+siap.length+'</b> dari '+BATCH.length+' file sudah dapat barisnya';
+  $('#btnBSimpan').disabled=!siap.length;
+  const pesan=[];
+  const tanpaTeks=BATCH.filter(b=>b.cara==='tanpa teks');
+  if(tanpaTeks.length)pesan.push('<b>'+tanpaTeks.length+' file tidak ada teksnya</b> (hasil scan/foto). Centang <b>pakai OCR</b> lalu Proses lagi, atau upload lewat Edit per baris supaya bisa dibaca AI.');
+  if(tanpaTotal.length)pesan.push('<b>'+tanpaTotal.length+' file totalnya tidak terbaca.</b> Boleh disimpan sebagai lampiran, tapi selisihnya belum bisa dihitung sampai totalnya diisi lewat Edit.');
+  const gagal=BATCH.filter(b=>b.err);
+  if(gagal.length)pesan.push('<b>'+gagal.length+' file gagal dibaca:</b> '+gagal.slice(0,2).map(b=>esc(b.name)+' ('+esc(b.err)+')').join('; '));
+  if(pesan.length){$('#bWarn').style.display='';$('#bWarn').innerHTML=pesan.join('<br>')}
+  const nmPo=id=>{const p=POS.find(x=>x.id===id);return p?((p.po_no||'(tanpa no PO)')+' · '+(p.supplier||'-').slice(0,18)):'—'};
+  /* Akibat dihitung KUMULATIF per baris: kalau dua file dalam satu
+     proses sama-sama menambah total ke baris yang sama, keduanya ikut
+     terhitung — supaya pratinjau sama dengan hasil setelah Simpan. */
+  BATCH.forEach(b=>{if(!b.target)b.calon=calonPo(b,BATCH)});
+  const jalan={};
+  BATCH.forEach(b=>{
+    if(!b.target)return;
+    if(!jalan[b.target]){const p=POS.find(x=>x.id===b.target),c=(p&&p.cek)||{};
+      jalan[b.target]={po:c.total_po??null,fisik:c.total_fisik??null,esb:c.total_esb??null}}
+    if(b.slot!=='gr'&&b.total!=null){const t=jalan[b.target];t[b.slot]=(t[b.slot]||0)+b.total}
+    b._akibat=evalCek({...jalan[b.target]});
+  });
+  $('#tB').innerHTML='<tr><th>File</th><th>Dibaca</th><th>Jenis</th><th>Nomor</th><th>Total</th><th>Masuk ke baris</th><th>Akibat</th></tr>'+
+    BATCH.map((b,i)=>{
+      let sel;
+      if(b.target)sel='<b>'+esc(nmPo(b.target))+'</b><div class="sub">cocok lewat '+esc(b.caraCocok)+'</div>';
+      else if(b.calon.length)sel='<select data-bt="'+i+'"><option value="">— pilih baris —</option>'+
+        b.calon.map(c=>'<option value="'+esc(c.p.id)+'">'+esc(nmPo(c.p.id))+' ('+c.sebab+')</option>').join('')+'</select>';
+      else sel='<span class="sub">tidak ada calon — upload lewat Edit per baris</span>';
+      let akibat='<span class="sub">—</span>';
+      if(b.target&&b._akibat){
+        const e=b._akibat;
+        akibat=e.status==='SELISIH'?'<span class="b bad">SELISIH '+fmtRp(e.selisih)+'</span>':
+               e.status==='MATCH'?'<span class="b ok">MATCH</span>':
+               '<span class="b mut">MENUNGGU '+(e.missing||[]).join(', ')+'</span>';
+      }
+      return '<tr><td>'+esc(b.name.slice(0,34))+(b.err?'<div class="sub warnx">'+esc(b.err)+'</div>':'')+'</td>'+
+        '<td class="sub">'+b.cara+'</td><td><span class="b mut">'+(SLOT_SHORT[b.slot]||b.slot)+'</span></td>'+
+        '<td class="mono">'+esc(b.nomor||'—')+'</td><td>'+(b.total!=null?fmtRp(b.total):'—')+'</td>'+
+        '<td>'+sel+'</td><td>'+akibat+'</td></tr>';
+    }).join('');
+  $('#tB').querySelectorAll('[data-bt]').forEach(el=>el.onchange=()=>{BATCH[+el.dataset.bt].target=el.value;BATCH[+el.dataset.bt].caraCocok='dipilih manual';renderBatch()});
+}
+$('#btnBSimpan').onclick=async()=>{
+  const kerja=BATCH.filter(b=>b.target);
+  if(!kerja.length)return;
+  const b=$('#btnBSimpan');
+  if(b.dataset.c!=='1'){b.dataset.c='1';b.textContent='Simpan '+kerja.length+' dokumen? klik lagi';
+    setTimeout(()=>{if(b.dataset.c==='1'){b.dataset.c='';b.textContent='Simpan'}},5000);return}
+  b.dataset.c='';b.disabled=true;$('#btnBProses').disabled=true;
+  const now=nowIso(),catatJam=$('#bJam').checked;
+  // dikelompokkan per baris PO supaya satu baris cukup sekali simpan
+  const grup={};kerja.forEach(x=>{(grup[x.target]=grup[x.target]||[]).push(x)});
+  let ok=0,gagal=0;const salah=[];
+  const ids=Object.keys(grup);
+  for(let i=0;i<ids.length;i++){
+    const id=ids[i],isi=grup[id];
+    $('#bInfo').textContent='menyimpan '+(i+1)+'/'+ids.length;
+    $('#bBar').style.width=Math.round(i/ids.length*100)+'%';
+    const p=POS.find(x=>x.id===id);
+    if(!p){gagal+=isi.length;continue}
+    const cek=Object.assign({},p.cek||{});
+    /* PENTING: toRow() mengisi null ke setiap kolom yang tidak ada di objek
+       ini. Jadi harus berangkat dari baris UTUH — kalau hanya mengirim
+       kolom yang berubah, po_no / supplier / region / created ikut terhapus. */
+    const d=Object.assign({},p,{updated:now});
+    delete d.id;
+    try{
+      for(const x of isi){
+        const ext=(x.name.split('.').pop()||'bin').toLowerCase();
+        const asset=await uploadDoc(x.file,x.slot,ext,id);
+        const key=x.slot+'_docs';
+        const arr=(cek[key]||[]).slice();
+        arr.push({name:x.name,no:x.nomor||null,total:x.total!=null?x.total:null,
+          src:x.cara==='ocr'?'ocr':'teks',label:(x.info&&x.info.total_label)||null,
+          asset,pdf:!!x.isPdf,at:now,by:uid,npages:(x.pages&&x.pages.length)||1});
+        cek[key]=arr;
+        cek[x.slot+'_asset']=arr[0].asset;cek[x.slot+'_pdf']=!!arr[0].pdf;
+        cek[x.slot+'_at']=cek[x.slot+'_at']||now;cek[x.slot+'_by']=cek[x.slot+'_by']||uid;
+        if(x.slot!=='gr'){const v=arr.map(z=>z.total).filter(z=>z!=null);
+          cek['total_'+x.slot]=v.length?v.reduce((a,c)=>a+c,0):null}
+        // nomor yang belum terisi di baris, diisi dari dokumennya
+        if(x.slot==='po'&&x.nomor){const l=new Set([...(p.po_nos||[]),...(p.po_no?[p.po_no]:[]),x.nomor]);d.po_nos=[...l];if(!p.po_no)d.po_no=x.nomor}
+        if(x.slot==='gr'&&x.nomor){const l=new Set([...(p.gr_nos||[]),...(p.gr_no?[p.gr_no]:[]),x.nomor]);d.gr_nos=[...l];
+          if(!p.gr_no){d.gr_no=x.nomor;if(catatJam&&!p.legacy&&!p.gr_at){d.gr_at=now;d.gr_by=uid}}}
+        if(x.slot==='esb'&&x.nomor&&!p.inv_no){d.inv_no=x.nomor;if(catatJam&&!p.legacy&&!p.inv_at){d.inv_at=now;d.inv_by=uid}}
+        if(x.slot==='esb'&&x.info&&x.info.inv_dist&&!p.inv_dist)d.inv_dist=x.info.inv_dist;
+        ok++;
+      }
+      const e=evalCek({po:cek.total_po??null,fisik:cek.total_fisik??null,esb:cek.total_esb??null});
+      cek.status=e.status;cek.selisih=e.selisih;cek.detail=e.detail||'';cek.missing=e.missing;
+      cek.at=now;cek.by=uid;
+      d.cek=cek;
+      if(p.nominal==null&&cek.total_esb!=null)d.nominal=cek.total_esb;
+      await sbSave(id,d);
+    }catch(err){
+      gagal+=isi.length;ok-=isi.length>0?0:0;
+      salah.push((p.po_no||id)+': '+String(err.message||err).slice(0,70));
+      logFail('batch',String(err.message||err).slice(0,150),{po_id:id});
+    }
+  }
+  $('#bBar').style.width='100%';
+  b.disabled=false;b.textContent='Simpan';$('#btnBProses').disabled=false;
+  if(salah.length){$('#bWarn').style.display='';$('#bWarn').innerHTML='<b>Gagal pada '+salah.length+' baris:</b><br>'+salah.slice(0,4).map(esc).join('<br>')}
+  toast(ok+' dokumen tersimpan'+(gagal?(' · '+gagal+' gagal'):''));
+  BATCH=[];$('#tB').innerHTML='';$('#bFile').value='';$('#btnBSimpan').disabled=true;$('#bInfo').textContent='';
+  loadPos();
+};
+
+/* ================= tempel banyak PO sekaligus =================
+   Masalah yang diselesaikan: menyusul PO yang belum terinput satu per
+   satu lewat form itu lambat. Di sini satu tempelan bisa puluhan baris.
+   Kolomnya dikenali dari judul kalau ada, kalau tidak ditebak dari isi.
+   Yang wajib hanya No PO. */
+const TMP_SIN={
+  po_no:['no po','no. po','nomor po','po no','po number','nopo','po'],
+  gr_no:['no gr','no. gr','nomor gr','gr no','nogr','gr'],
+  inv_no:['no invoice','no. invoice','nomor invoice','no inv','no vi','invoice','vi'],
+  inv_dist:['nomor inv distributor','inv distributor','invoice distributor','no inv dist','nota distributor'],
+  supplier:['supplier','nama supplier','vendor','distributor','pemasok'],
+  tgl:['tanggal','tgl','date','tanggal input','tanggal po','tgl po'],
+  tgl_gudang:['tanggal gudang','tgl gudang','tanggal input grup gudang','tanggal terima'],
+  nominal:['nominal','total','grand total','jumlah','amount','nilai'],
+  region:['region','area','cabang','branch','gudang','wilayah'],
+  keterangan:['keterangan','catatan','note','ket']
+};
+const pecahBaris=t=>String(t||'').replace(/\r/g,'').split('\n').map(b=>b.trim()).filter(Boolean);
+function pecahKolom(baris){
+  if(baris.includes('\t'))return baris.split('\t').map(x=>x.trim());
+  if((baris.match(/;/g)||[]).length>=1)return baris.split(';').map(x=>x.trim());
+  if((baris.match(/,/g)||[]).length>=2&&!/\d,\d{3}/.test(baris))return baris.split(',').map(x=>x.trim());
+  return baris.split(/\s{2,}/).map(x=>x.trim());
+}
+const rapiTgl=v=>{
+  const t=String(v||'').trim();
+  let m=t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m)return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  m=t.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/);          // 20/11/2026
+  if(m)return `${m[3]}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
+  return '';
+};
+function petaKolom(sel){
+  // judul kolom -> nomor kolom
+  const peta={},pakai=new Set();
+  sel.forEach((h,i)=>{
+    const k=String(h||'').toLowerCase().replace(/[^a-z0-9. ]/g,'').trim();
+    if(!k)return;
+    for(const [field,kata] of Object.entries(TMP_SIN)){
+      if(peta[field]!=null||pakai.has(i))continue;
+      if(kata.some(w=>k===w||k.startsWith(w+' ')||k===w+'.'||k.replace(/\./g,'')===w.replace(/\./g,''))){
+        peta[field]=i;pakai.add(i);break;
+      }
+    }
+  });
+  return peta;
+}
+/* Bentuk yang sah untuk tiap kolom. Dipakai dua kali:
+   saat menebak kolom, dan saat mengambil nilainya — supaya nomor GR
+   tidak pernah bisa masuk ke kolom nominal walau kolomnya salah tebak. */
+const TMP_BENTUK={
+  po_no:   v=>/^PO[\d\/-]/i.test(v),
+  gr_no:   v=>/^GR[\d\/-]/i.test(v),
+  inv_no:  v=>/^(VI|INV)[\d\/-]/i.test(v),
+  region:  v=>REGIONS.includes(v.toUpperCase()),
+  tgl:     v=>!!rapiTgl(v),
+  tgl_gudang: v=>!!rapiTgl(v),
+  nominal: v=>/^[\d][\d.,]*$/.test(v)&&!/^(20\d{6})$/.test(v)&&(parseRp(v)||0)>=1000,
+  supplier:v=>/[A-Za-z]{3}/.test(v)&&!/^(PO|GR|VI|INV)[\d\/-]/i.test(v)&&!REGIONS.includes(v.toUpperCase()),
+  inv_dist:v=>v.length>2,
+  keterangan:v=>v.length>0
+};
+// Hanya kolom yang bisa ditebak dari bentuk isinya, berurutan dari yang paling khas
+const TMP_URUT=['po_no','gr_no','inv_no','region','tgl','nominal','supplier'];
+function tebakKolom(semua){
+  // Dihitung dari SELURUH baris: tiap kolom dinilai, yang paling sering
+  // cocok yang menang. Kalau hanya baris pertama yang dilihat, kolom yang
+  // kosong di baris pertama akan merebut isi kolom lain di baris berikutnya.
+  const lebar=Math.max(...semua.map(r=>r.length));
+  const skor={};
+  for(let i=0;i<lebar;i++){
+    skor[i]={};
+    for(const f of TMP_URUT){
+      let cocok=0,terisi=0;
+      for(const r of semua){
+        const v=String(r[i]||'').trim();
+        if(!v)continue;
+        terisi++;
+        if(TMP_BENTUK[f](v))cocok++;
+      }
+      skor[i][f]=terisi?cocok/terisi:0;
+    }
+  }
+  const peta={},dipakai=new Set();
+  for(const f of TMP_URUT){
+    let terbaik=-1,nilai=0;
+    for(let i=0;i<lebar;i++){
+      if(dipakai.has(i))continue;
+      if(skor[i][f]>nilai){nilai=skor[i][f];terbaik=i}
+    }
+    if(terbaik>=0&&nilai>=0.6){peta[f]=terbaik;dipakai.add(terbaik)}
+  }
+  return peta;
+}
+let TMP=[];
+function cekTempel(){
+  const teks=$('#tmpIn').value;
+  const baris=pecahBaris(teks);
+  $('#tmpWarn').style.display='none';
+  if(!baris.length){TMP=[];$('#tTmp').innerHTML='';$('#tmpInfo').textContent='Belum ada yang ditempel.';$('#btnTmpSimpan').disabled=true;return}
+  const sel=baris.map(pecahKolom);
+  let peta=petaKolom(sel[0]),mulai=1;
+  if(peta.po_no==null){peta=tebakKolom(sel);mulai=0}   // tak ada baris judul: tebak dari seluruh isi
+  if(peta.po_no==null){
+    $('#tTmp').innerHTML='';$('#btnTmpSimpan').disabled=true;
+    $('#tmpInfo').textContent='';
+    $('#tmpWarn').style.display='';
+    $('#tmpWarn').innerHTML='Kolom <b>No PO</b> tidak ketemu. Pastikan ada kolom berisi nomor PO (mis. PO202611200015), atau sertakan baris judul yang memuat tulisan "No PO".';
+    return;
+  }
+  // Nilai yang bentuknya tidak sesuai kolomnya dibuang, bukan dipaksa masuk.
+  const tolak=[];
+  const amb=(r,f,noBaris)=>{
+    if(peta[f]==null)return '';
+    const v=String(r[peta[f]]||'').trim();
+    if(!v)return '';
+    const uji=TMP_BENTUK[f];
+    if(uji&&!uji(v)){tolak.push({baris:noBaris,kolom:f,isi:v});return ''}
+    return v;
+  };
+  const adaDb=new Set(POS.map(p=>p.id));
+  const sudahDiTempelan=new Set();
+  const regDefault=$('#tmpRegion').value||REGIONS[0];
+  TMP=[];
+  for(let i=mulai;i<sel.length;i++){
+    const r=sel[i];
+    const nb=i+1;
+    const po=amb(r,'po_no',nb).toUpperCase();
+    if(!po)continue;
+    const reg=(amb(r,'region',nb).toUpperCase()||regDefault);
+    const nomStr=amb(r,'nominal',nb);
+    const d={
+      po_no:po, gr_no:amb(r,'gr_no',nb).toUpperCase(), inv_no:amb(r,'inv_no',nb).toUpperCase(),
+      inv_dist:amb(r,'inv_dist',nb), supplier:amb(r,'supplier',nb), keterangan:amb(r,'keterangan',nb),
+      region:REGIONS.includes(reg)?reg:regDefault,
+      tgl:rapiTgl(amb(r,'tgl',nb)), tgl_gudang:rapiTgl(amb(r,'tgl_gudang',nb)),
+      nominal:nomStr?parseRp(nomStr):null
+    };
+    if(!d.tgl){const m=po.match(/(20\d{2})(\d{2})(\d{2})/);d.tgl=m?`${m[1]}-${m[2]}-${m[3]}`:jktDate()}
+    const id=docId(po);
+    let hal='';
+    if(sudahDiTempelan.has(id))hal='dobel di tempelan ini';
+    else if(adaDb.has(id))hal='sudah ada di sistem';
+    else if(!REGIONS.includes(reg))hal='region dipakai default';
+    sudahDiTempelan.add(id);
+    TMP.push({...d,id,hal,lewat:hal==='dobel di tempelan ini'||hal==='sudah ada di sistem'});
+  }
+  const baru=TMP.filter(t=>!t.lewat);
+  const ketemu=Object.keys(peta).filter(k=>peta[k]!=null);
+  $('#tmpInfo').innerHTML='<b>'+baru.length+'</b> baru · '+(TMP.length-baru.length)+' dilewati · kolom terbaca: '+ketemu.join(', ');
+  $('#btnTmpSimpan').disabled=!baru.length;
+  const kurang=[];
+  const lebarVar=new Set(sel.slice(mulai).map(r=>r.length));
+  if(lebarVar.size>1)kurang.push('Jumlah kolom tiap baris <b>tidak sama</b> ('+[...lebarVar].sort().join(', ')+' kolom). Periksa tabel di bawah baris per baris sebelum menyimpan — ada kolom yang mungkin bergeser.');
+  if(tolak.length){
+    const contoh=tolak.slice(0,3).map(t=>'baris '+t.baris+' kolom '+t.kolom+' = "'+esc(t.isi)+'"').join('; ');
+    kurang.push('<b>'+tolak.length+' sel diabaikan</b> karena bentuknya tidak cocok dengan kolomnya: '+contoh+(tolak.length>3?' …':'')+'. Nilai seperti ini <b>tidak</b> dipaksa masuk — lebih baik kosong daripada salah angka.');
+  }
+  if(peta.region==null)kurang.push('<b>Region</b> tidak ada di tempelan — <b>semua '+baru.length+' baris dipakaikan '+esc(regDefault)+'</b>. Kalau tempelannya campur region, pisahkan per region atau tambahkan kolom Region, karena region yang salah ikut salah di KPI dan outstanding.');
+  if(peta.supplier==null)kurang.push('Kolom <b>Supplier</b> tidak terbaca — bisa dilengkapi nanti lewat Edit.');
+  if(peta.nominal==null)kurang.push('Kolom <b>Nominal</b> tidak terbaca — bisa dilengkapi nanti lewat Edit.');
+  if(kurang.length){$('#tmpWarn').style.display='';$('#tmpWarn').innerHTML=kurang.join('<br>')}
+  $('#tTmp').innerHTML='<tr><th>No PO</th><th>Region</th><th>Supplier</th><th>Tanggal</th><th>No GR</th><th>No Invoice</th><th>Nominal</th><th>Status</th></tr>'+
+    TMP.map(t=>'<tr'+(t.lewat?' style="opacity:.45"':'')+'><td class="mono">'+esc(t.po_no)+'</td><td><span class="b mut">'+esc(t.region)+'</span></td>'+
+      '<td>'+esc(t.supplier||'—')+'</td><td>'+fmtTgl(t.tgl)+'</td><td class="mono">'+esc(t.gr_no||'—')+'</td>'+
+      '<td class="mono">'+esc(t.inv_no||'—')+'</td><td>'+(t.nominal!=null?fmtRp(t.nominal):'—')+'</td>'+
+      '<td class="sub">'+(t.lewat?'<b>dilewati</b> — '+esc(t.hal):(t.hal?esc(t.hal):'siap'))+'</td></tr>').join('');
+}
+$('#btnTmpCek').onclick=()=>cekTempel();
+$('#tmpRegion').onchange=()=>{if(TMP.length)cekTempel()};
+$('#btnTmpSimpan').onclick=async()=>{
+  const baru=TMP.filter(t=>!t.lewat);
+  if(!baru.length)return;
+  const mode=$('#tmpMode').value;
+  const b=$('#btnTmpSimpan');
+  if(b.dataset.c!=='1'){
+    b.dataset.c='1';
+    b.textContent='Simpan '+baru.length+' PO? klik lagi';
+    setTimeout(()=>{if(b.dataset.c==='1'){b.dataset.c='';b.textContent='Simpan'}},5000);
+    return;
+  }
+  b.dataset.c='';b.disabled=true;b.textContent='menyimpan…';
+  const now=nowIso();
+  let n=0,gagal=0;
+  for(const t of baru){
+    const ts=new Date(t.tgl+'T00:00:00+07:00').toISOString();
+    const row={region:t.region,supplier:t.supplier,po_no:t.po_no,po_nos:t.po_no?[t.po_no]:[],
+      gr_no:t.gr_no,gr_nos:t.gr_no?[t.gr_no]:[],inv_no:t.inv_no,inv_dist:t.inv_dist,
+      tgl:t.tgl,tgl_gudang:t.tgl_gudang,nominal:t.nominal,keterangan:t.keterangan,
+      created:mode==='now'?now:ts,updated:now,legacy:mode!=='now',
+      po_at:mode==='now'?now:null, po_by:mode==='now'?uid:null,
+      gr_at:mode==='now'&&t.gr_no?now:null, gr_by:mode==='now'&&t.gr_no?uid:null,
+      inv_at:mode==='now'&&t.inv_no?now:null, inv_by:mode==='now'&&t.inv_no?uid:null};
+    try{await sbSave(t.id,row);n++}catch(e){gagal++;logFail('tempel',String(e.message||e).slice(0,150),{file_name:t.po_no})}
+  }
+  b.disabled=false;b.textContent='Simpan';
+  toast(n+' PO tersimpan'+(gagal?(' · '+gagal+' gagal'):'')+(mode==='now'?'':' — ditandai import, tidak masuk KPI jam'));
+  $('#tmpIn').value='';TMP=[];$('#tTmp').innerHTML='';$('#tmpInfo').textContent='';
+  loadPos();
+};
+$('#tmpMode').onchange=()=>{
+  const w=$('#tmpWarn');
+  if($('#tmpMode').value==='now'){
+    w.style.display='';
+    w.innerHTML='Mode <b>PO baru hari ini</b>: jam PO dicatat sekarang. Kalau tempelan ini juga memuat No GR dan No Invoice, jamnya ikut tercatat sekarang juga sehingga <b>jeda PO→GR→Invoice jadi 0 jam</b>. Itu membuat KPI tim terlihat lebih cepat dari kenyataan. Pakai mode ini hanya kalau PO/GR/Invoice memang baru dibuat bersamaan hari ini.';
+  }else{cekTempel()}
+};
 
 /* ---------- import xlsx ---------- */
 let XL=null;$('#impFile').onchange=()=>{$('#btnImport').disabled=!$('#impFile').files[0]};
