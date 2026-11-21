@@ -19,6 +19,7 @@
     <button data-v="dash" class="active">Dashboard KPI</button>
     <button data-v="out">Outstanding <span class="pill" id="pillOut">0</span></button>
     <button data-v="po">PO Tracking <span class="pill" id="pillCek" title="selisih invoice">0</span></button>
+    <button data-v="sel">Selisih <span class="pill" id="pillSel">0</span></button>
     <button data-v="set">Import &amp; Setting</button>
   </nav>
   <div class="who" id="who">Menghubungkan…</div>
@@ -67,6 +68,27 @@
 
 
 <!-- SETTING -->
+<!-- SELISIH -->
+<section class="view" id="v-sel">
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <label class="f">Region<select id="sRegion"><option value="">Semua region</option></select></label>
+      <label class="f">Tampilkan<select id="sStatus">
+        <option value="SELISIH">Hanya yang selisih</option>
+        <option value="BELUM">Belum lengkap dokumennya</option>
+        <option value="ALL">Semua yang sudah dicek</option>
+      </select></label>
+      <label class="f">Urut<select id="sSort">
+        <option value="besar">Selisih terbesar</option>
+        <option value="baru">Paling baru dicek</option>
+      </select></label>
+      <button class="btn" id="btnSelCsv">Export CSV</button>
+      <div class="note" style="margin-left:auto" id="selRingkas"></div>
+    </div>
+    <div class="tw" style="max-height:none"><table id="tSel"></table></div>
+  </div>
+</section>
+
 <section class="view" id="v-set">
   <div class="card">
     <h2>Profil saya</h2>
@@ -82,6 +104,38 @@
       <label class="f" style="grid-column:1/-1">Kata kunci total tambahan <span class="sub" style="font-weight:400">(opsional, pisahkan dengan koma — untuk distributor yang memakai istilah lain, mis. <i>Total Bayar, Nilai Nota, Jumlah Tagihan</i>)</span><input id="sLabel" placeholder="Total Bayar, Nilai Nota"></label>
     </div>
     <div class="row" style="margin-top:10px"><button class="btn p" id="btnSaveSet">Simpan setting</button><span class="sub" id="setInfo">Hanya Editor/Owner yang bisa mengubah.</span></div>
+  </div>
+  <div class="card">
+    <h2>📑 Proses banyak dokumen sekaligus</h2>
+    <div class="sub" style="margin-bottom:8px">Pilih banyak file PO / GR / Invoice ESB / nota fisik sekaligus. Tiap file dibaca, nomor &amp; totalnya diambil, lalu <b>dicocokkan sendiri ke baris PO-nya</b> dan selisihnya dihitung. Belum ada yang tersimpan sampai Anda klik Simpan.</div>
+    <div class="row">
+      <input type="file" id="bFile" multiple accept=".pdf,.jpg,.jpeg,.png,.webp">
+      <label class="sub"><input type="checkbox" id="bOcr"> pakai OCR untuk file tanpa teks (lambat)</label>
+      <label class="sub"><input type="checkbox" id="bJam"> catat jam entry untuk nomor yang baru terisi</label>
+      <button class="btn" id="btnBProses" disabled>Proses</button>
+      <button class="btn p" id="btnBSimpan" disabled>Simpan</button>
+      <span class="sub" id="bInfo"></span>
+    </div>
+    <div class="bar" style="margin-top:6px"><i id="bBar" style="width:0"></i></div>
+    <div class="sub warnx" id="bWarn" style="margin-top:6px;display:none"></div>
+    <div class="tw" style="max-height:380px;margin-top:8px"><table id="tB"></table></div>
+  </div>
+  <div class="card">
+    <h2>📋 Tempel banyak PO sekaligus</h2>
+    <div class="sub" style="margin-bottom:8px">Untuk menyusul PO yang belum terinput. Blok barisnya di Excel atau di layar ESB, salin (Ctrl+C), lalu tempel di bawah. Kolomnya dikenali sendiri — boleh urutan apa saja, boleh pakai baris judul atau tidak. Yang wajib hanya <b>No PO</b>.</div>
+    <textarea id="tmpIn" rows="6" placeholder="Tempel di sini. Contoh:&#10;No PO&#9;Supplier&#9;No GR&#9;No Invoice&#9;Nominal&#10;PO202611200015&#9;CV MITRA PANGAN&#9;GR202611200031&#9;VI202611200009&#9;4.972.800" style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+    <div class="row" style="margin-top:8px">
+      <label class="f">Region default<select id="tmpRegion"></select></label>
+      <label class="f">Perlakuan<select id="tmpMode">
+        <option value="legacy">Susulan / backlog — tanpa jam, tidak masuk KPI</option>
+        <option value="now">PO baru hari ini — jam dicatat sekarang</option>
+      </select></label>
+      <button class="btn" id="btnTmpCek">Periksa</button>
+      <button class="btn p" id="btnTmpSimpan" disabled>Simpan</button>
+      <span class="sub" id="tmpInfo"></span>
+    </div>
+    <div class="sub warnx" id="tmpWarn" style="margin-top:6px;display:none"></div>
+    <div class="tw" style="max-height:340px;margin-top:8px"><table id="tTmp"></table></div>
   </div>
   <div class="card">
     <h2>Import dari Excel tracking lama</h2><div class="sub" style="margin-bottom:6px">Alternatif: jalankan <code>python/upload_seed.py</code> (lihat README) — lebih cepat untuk ribuan baris.</div>
@@ -110,6 +164,17 @@
     <div class="sub" style="margin-bottom:8px">Untuk memastikan semua orang sudah memakai versi terbaru setelah deploy. Tercatat saat tiap orang membuka aplikasi.</div>
     <div class="row" style="margin-bottom:8px"><button class="btn" id="btnUsers">Muat ulang</button></div>
     <div class="tw" style="max-height:none"><table id="tUsers"></table></div>
+  </div>
+  <div class="card">
+    <h2>🗑️ Keranjang sampah</h2>
+    <div class="sub" style="margin-bottom:8px">PO yang dihapus tidak langsung hilang — masuk ke sini dulu supaya bisa dipulihkan kalau ternyata salah hapus. Siapa yang menghapus dan kapan, ikut tercatat.</div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn" id="btnTrash">Muat keranjang</button>
+      <button class="btn" id="btnTrashAll" style="display:none">Kosongkan keranjang</button>
+      <label class="sub">Dibuang otomatis setelah <input id="sTrashDays" type="number" min="1" max="365" value="14" style="width:64px" disabled> hari <span class="sub">(admin, tersimpan bersama setting lain)</span></label>
+      <span class="sub" id="trashCount"></span>
+    </div>
+    <div class="tw" style="max-height:none"><table id="tTrash"></table></div>
   </div>
   <div class="card">
     <h2>Diagnostik — kalau upload dokumen gagal</h2>
@@ -168,6 +233,7 @@
   </div>
   <div class="row" style="margin-top:8px">
     <button class="btn" id="btnText">🔤 Baca dari teks dokumen</button>
+    <button class="btn" id="btnOCR">🔎 Baca OCR (scan/foto)</button>
     <button class="btn p" id="btnAI">🤖 Baca dengan AI</button>
     <span class="sub" style="flex:1">Teks = gratis &amp; langsung, untuk PDF asli. AI = untuk foto/scan, memakai kuota Gemini. <b>Selalu cocokkan angkanya dengan dokumen asli.</b><br><span id="aiCount" class="sub"></span></span>
   </div>
